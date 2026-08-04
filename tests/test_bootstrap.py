@@ -21,6 +21,8 @@ def test_provider_from_env():
 
     from rw_promptforge.provider import Provider
 
+    # Clear any existing endpoint
+    os.environ.pop("OPENAI_ENDPOINT", None)
     os.environ["OPENROUTER_API_KEY"] = "sk-test-123"
     provider = Provider.from_env()
     assert "openrouter.ai" in provider.endpoint
@@ -69,12 +71,12 @@ def test_reflector_import():
     reflector = Reflector(Provider())
     assert reflector is not None
     assert "CURRENT ARTIFACT" in REFLECTION_USER_TEMPLATE
-    assert "prompt engineering expert" in REFLECTION_SYSTEM_PROMPT
+    assert "improving LLM agent instructions" in REFLECTION_SYSTEM_PROMPT
 
 
 def test_session_db_reader():
     from rw_promptforge.datastore.session_db import SessionDBReader
 
     reader = SessionDBReader()
-    assert reader.db_path.name == "sessions.db"
-    assert not reader.exists()  # Won't exist unless we're in a Hermes environment with session_db
+    assert reader.db_path.name == "state.db"
+    assert reader.exists()  # state.db exists on this machine

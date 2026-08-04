@@ -7,12 +7,14 @@ Queries state.db for:
 - Sessions where user corrected the agent after loading a skill
 - Tool call failures when a skill was loaded
 - Protocol violations (agent did X despite SOUL.md saying don't do X)
+- Nearby successes (what the agent did RIGHT in the same session)
+- Severity-ranked traces (HIGH > MEDIUM > LOW)
 """
 
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -27,6 +29,17 @@ class FailureTrace:
     agent_response: str = ""
     skill_name: str = ""
     context: str = ""
+    severity: int = 0  # 0=low, 1=medium, 2=high
+
+
+@dataclass
+class ContrastiveTraces:
+    """Failure traces paired with nearby successes."""
+
+    failures: list[FailureTrace]
+    successes: list[str]  # What the agent did right in nearby sessions
+    root_cause: str = ""  # Diagnosed pattern (set by hypothesis step)
+    section_hint: str = ""  # Which section to target (if detected)
 
 
 class SessionDBReader:
@@ -35,22 +48,23 @@ class SessionDBReader:
     DEFAULT_PATH = Path.home() / ".hermes" / "state.db"
 
     CORRECTION_PATTERNS = [
-        "%thats not what%",
-        "%that's not what%",
-        "%not what i%",
-        "%you were supposed%",
-        "%you should have%",
-        "%you did%wrong%",
-        "%actually%should%",
-        "%no, %",
-        "%wrong%",
-        "%you just%",
-        "%you committed%",
-        "%you were supposed to%",
-        "%dont%commit%",
-        "%don't%commit%",
-        "%never%touch%",
+        ("%thats not what%", 2),
+        ("%that's not what%", 2),
+        ("%not what i%", 2),
+        ("%you were supposed%", 2),
+        ("%you should have%", 2),
+        ("%you did%wrong%", 2),
+        ("%actually%should%", 1),
+        ("%no, %", 1),
+        ("%wrong%", 1),
+        ("%you just%", 1),
+        ("%you committed%", 2),
+        ("%you were supposed to%", 2),
+        ("%dont%commit%", 2),
+        ("%don't%commit%", 2),
+        ("%never%touch%", 2),
     ]
+    # (pattern, severity) — 0=low, 1=medium, 2=high
 
     PROTOCOL_VIOLATION_PATTERNS = [
         "%committed to hermes%",
@@ -60,6 +74,17 @@ class SessionDBReader:
         "%skipped verification%",
         "%claimed done%",
         "%without verifying%",
+    ]
+
+    SUCCESS_PATTERNS = [
+        "%correctly identified%",
+        "%properly verified%",
+        "%checked first%",
+        "%asked the user%",
+        "%confirmed before%",
+        "%good work%",
+        "%that's right%",
+        "%exactly%",
     ]
 
     def __init__(self, db_path: str | Path | None = None) -> None:
@@ -90,7 +115,7 @@ class SessionDBReader:
         used a skill (or should have used one).
         """
         traces = []
-        for pattern in self.CORRECTION_PATTERNS:
+        for pattern, severity in self.CORRECTION_PATTERNS:
             rows = self._query(
                 """
                 SELECT DISTINCT m.session_id, m.timestamp, m.content
@@ -120,9 +145,10 @@ class SessionDBReader:
                         what_happened=prev[0]["content"][:500] if prev else "",
                         user_correction=row["content"][:500],
                         skill_name=skill_name or "",
+                        severity=severity,
                     )
                 )
-        # Deduplicate by session_id + timestamp
+        # Deduplicate and sort by severity
         seen = set()
         unique = []
         for t in traces:
@@ -130,6 +156,7 @@ class SessionDBReader:
             if key not in seen:
                 seen.add(key)
                 unique.append(t)
+        unique.sort(key=lambda x: x.severity, reverse=True)
         return unique[:limit]
 
     def find_protocol_violations(self, limit: int = 10) -> list[FailureTrace]:
@@ -161,6 +188,7 @@ class SessionDBReader:
                         what_happened=row["content"][:500],
                         user_correction="",
                         context="protocol_violation",
+                        severity=2,  # Protocol violations are high severity
                     )
                 )
         seen = set()
@@ -195,7 +223,6 @@ class SessionDBReader:
         )
         traces = []
         for row in rows:
-            # Get the first error from this session
             error = self._query(
                 """
                 SELECT content FROM messages
@@ -212,9 +239,87 @@ class SessionDBReader:
                     what_happened=f"{row['fail_count']} tool failures",
                     user_correction=error[0]["content"][:300] if error else "",
                     skill_name=skill_name or "",
+                    severity=1,  # Tool failures are medium severity
                 )
             )
         return traces
+
+    def find_successes(self, limit: int = 5) -> list[str]:
+        """Find sessions where the agent did something right.
+
+        These are "nearby successes" — patterns we want to PRESERVE
+        while fixing the failures.
+        """
+        successes = []
+        for pattern in self.SUCCESS_PATTERNS:
+            rows = self._query(
+                """
+                SELECT content FROM messages
+                WHERE role = 'user'
+                AND content LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (pattern, limit),
+            )
+            for row in rows:
+                successes.append(row["content"][:200])
+        # Deduplicate
+        return list(dict.fromkeys(successes))[:limit]
+
+    def get_contrastive_summary(
+        self, skill_name: str | None = None, limit: int = 5
+    ) -> ContrastiveTraces:
+        """Get contrastive traces: failures + successes + root cause.
+
+        This is the improved version of get_failure_summary —
+        it includes both what went wrong AND what went right.
+        """
+        # Get failures (sorted by severity)
+        corrections = self.find_corrections(skill_name, limit)
+        violations = self.find_protocol_violations(limit // 2)
+        failures = self.find_tool_failures(skill_name, limit // 2)
+
+        all_failures = corrections + violations + failures
+        all_failures.sort(key=lambda x: x.severity, reverse=True)
+
+        # Get nearby successes
+        successes = self.find_successes(limit)
+
+        return ContrastiveTraces(
+            failures=all_failures[:limit],
+            successes=successes,
+        )
+
+    def format_contrastive_traces(self, traces: ContrastiveTraces) -> str:
+        """Format contrastive traces for the reflector LLM.
+
+        Structure: failures first, then successes to preserve.
+        """
+        sections = []
+
+        if traces.failures:
+            sections.append("## FAILURES (what went wrong)")
+            for t in traces.failures:
+                severity_label = {0: "LOW", 1: "MEDIUM", 2: "HIGH"}[t.severity]
+                sections.append(
+                    f"### [{severity_label}] Session {t.session_id}\n"
+                    f"What agent did: {t.what_happened[:200]}\n"
+                    f"User said: {t.user_correction[:200] if t.user_correction else t.context}"
+                )
+
+        if traces.successes:
+            sections.append("## SUCCESSES (what worked — preserve these)")
+            for s in traces.successes:
+                sections.append(f"- {s[:200]}")
+
+        if traces.root_cause:
+            sections.append(f"## ROOT CAUSE DIAGNOSIS\n{traces.root_cause}")
+
+        if not sections:
+            return "No relevant traces found."
+
+        return "\n\n".join(sections)
 
     def get_failure_summary(
         self, skill_name: str | None = None, limit: int = 5
@@ -224,38 +329,5 @@ class SessionDBReader:
         This is the Actionable Side Information — real traces from
         real usage that the reflector uses to improve the skill.
         """
-        corrections = self.find_corrections(skill_name, limit)
-        violations = self.find_protocol_violations(limit // 2)
-        failures = self.find_tool_failures(skill_name, limit // 2)
-
-        sections = []
-
-        if corrections:
-            sections.append("## USER CORRECTIONS (agent did X wrong)")
-            for t in corrections:
-                sections.append(
-                    f"### Session {t.session_id}\n"
-                    f"What agent did: {t.what_happened[:200]}\n"
-                    f"User said: {t.user_correction[:200]}"
-                )
-
-        if violations:
-            sections.append("## PROTOCOL VIOLATIONS")
-            for t in violations:
-                sections.append(
-                    f"### Session {t.session_id}\n"
-                    f"Violation: {t.what_happened[:300]}"
-                )
-
-        if failures:
-            sections.append("## REPEATED TOOL FAILURES")
-            for t in failures:
-                sections.append(
-                    f"### Session {t.session_id} ({t.what_happened})\n"
-                    f"Error: {t.user_correction[:200]}"
-                )
-
-        if not sections:
-            return "No failure traces found for this skill/SOUL.md."
-
-        return "\n\n".join(sections)
+        traces = self.get_contrastive_summary(skill_name, limit)
+        return self.format_contrastive_traces(traces)

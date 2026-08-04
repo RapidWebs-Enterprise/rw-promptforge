@@ -19,6 +19,8 @@ from pathlib import Path
 from rw_promptforge.datastore.session_db import SessionDBReader
 from rw_promptforge.reflector.engine import Reflector
 
+MAX_ROUNDS_CAP = 20
+
 
 @dataclass
 class OptimizeResult:
@@ -57,7 +59,7 @@ class Optimizer:
     ) -> None:
         self.provider = provider
         self.reflector = reflector
-        self.max_rounds = max_rounds
+        self.max_rounds = min(max_rounds, MAX_ROUNDS_CAP)
         self.output_path = Path(output_path) if output_path else None
         self.db = SessionDBReader(db_path)
 
@@ -71,7 +73,7 @@ class Optimizer:
             # Query for real failures
             failure_summary = self.db.get_failure_summary(skill_name, limit=5)
 
-            if "No failure traces found" in failure_summary:
+            if "No relevant traces found" in failure_summary or "No failure traces found" in failure_summary:
                 return OptimizeResult(
                     artifact=artifact,
                     rounds=round_num,

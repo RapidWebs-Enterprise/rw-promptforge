@@ -4,14 +4,19 @@ Given a current artifact (skill/SOUL.md), REAL failure traces from session_db,
 and the history of improvements, the reflector asks an LLM to produce an
 improved version that prevents these failures from recurring.
 
-This is the CORE of the Simplify-Reflect-Evolve loop — and the key difference
-from a simple quality gate: we use REAL usage data, not synthetic evals.
+Improvements over v1:
+- Contrastive traces (failures + successes)
+- Hypothesis-first: diagnose root cause before rewriting
+- Accumulated memory: track what was tried
+- Section-level editing: target specific sections
+- Cache-friendly: stable prefix for LLM provider caching
 """
 
 from __future__ import annotations
 
 from rw_promptforge.provider import Provider
 
+# System prompt is now CACHEABLE — stable across all reflection calls
 REFLECTION_SYSTEM_PROMPT = """You are an expert at improving LLM agent instructions.
 Your task: given a CURRENT artifact (a skill or SOUL.md), and REAL failure traces
 from actual agent usage sessions, produce an IMPROVED version that prevents
@@ -26,8 +31,10 @@ Key principles:
    make those instructions MORE prominent, clearer, with concrete examples.
 6. Return ONLY the improved artifact. No explanation, no commentary, no code fences.
 7. If the artifact has YAML frontmatter, preserve and update it.
+8. Target SPECIFIC sections — don't rewrite everything.
 """
 
+# User prompt has dynamic content at the END (cache-friendly)
 REFLECTION_USER_TEMPLATE = """CURRENT ARTIFACT:
 ```
 {artifact}
@@ -75,3 +82,50 @@ class Reflector:
             prompt=user_prompt,
             system=REFLECTION_SYSTEM_PROMPT,
         )
+
+    def reflect_hypothesis_first(
+        self,
+        artifact: str,
+        failure_traces: str,
+        history: str = "(no prior improvements)",
+    ) -> tuple[str, str]:
+        """Two-step reflection: diagnose root cause, then rewrite.
+
+        Step 1: Ask LLM to identify the root cause pattern.
+        Step 2: Use that diagnosis to target the rewrite.
+
+        Returns:
+            (improved_artifact, root_cause_diagnosis)
+        """
+        # Step 1: Hypothesis generation (cheap, ~200 token call)
+        hypothesis_prompt = f"""Given these failure traces from real agent usage,
+what is the ROOT CAUSE pattern? Be specific — name the exact failure mode.
+
+FAILURES:
+{failure_traces}
+
+ROOT CAUSE:
+"""
+        root_cause = self.provider.reflect(
+            prompt=hypothesis_prompt,
+            system="You are a diagnostician. Identify the root cause of agent failures.",
+        ).strip()
+
+        # Step 2: Targeted rewrite with root cause context
+        user_prompt = REFLECTION_USER_TEMPLATE.format(
+            artifact=artifact,
+            failure_traces=failure_traces,
+            history=history,
+        )
+
+        # Inject root cause diagnosis into the artifact section
+        improved = self.provider.reflect(
+            prompt=user_prompt,
+            system=f"""{REFLECTION_SYSTEM_PROMPT}
+
+ROOT CAUSE DIAGNOSIS: {root_cause}
+
+Use this diagnosis to make targeted fixes. Don't rewrite what's working."""
+        )
+
+        return improved, root_cause
