@@ -1,32 +1,236 @@
-"""Data structures for the learning log and optimization results."""
+"""Data structures for the learning log, optimization results, and v2 extensions.
+
+Includes multi-dimensional category scoring, convergence state, and
+artifact metadata for the RefineStop v2 algorithm.
+"""
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass, field
 from typing import Literal
 
 
+# ── Failure Type Weights ──────────────────────────────────────────────
+
+FAILURE_TYPE_WEIGHTS: dict[str, float] = {
+    "protocol_violation": 2.0,  # agent ignored explicit instruction
+    "correction": 1.5,          # user corrected agent
+    "general": 1.0,             # default
+    "tool_failure": 0.5,        # less actionable for prompt improvements
+}
+
+# ── Size & Round Budgets ──────────────────────────────────────────────
+
+MAX_ARTIFACT_CHARS = 60000
+"""""Maximum artifact size before head+tail truncation."""
+
+SIZE_MULTIPLIER_CAP = 1.5
+"""Max allowable growth ratio relative to ORIGINAL artifact size (total, not per-round)."""
+
+MAX_ROUNDS_CAP = 20
+"""Hard ceiling on optimization iterations."""
+
+MAX_EFFECTIVE_TRACES = 5
+"""Number of failure traces surfaced to the reflector per round."""
+
+SEVERITY_BUDGET_PER_ROUND = 10.0
+"""Sum of trace multipliers allowed per round."""
+
+
+# ── Utility Functions ─────────────────────────────────────────────────
+
+
+def truncate_artifact(text: str, max_chars: int = MAX_ARTIFACT_CHARS) -> str:
+    """Head+tail truncation for oversize artifacts.
+
+    Preserves head and tail, inserts a truncation marker in the middle.
+    """
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return text[:half] + "\n... [TRUNCATED] ...\n" + text[-half:]
+
+
+def sequence_similarity(a: str, b: str) -> float:
+    """Character-level similarity ratio [0, 1] using SequenceMatcher.
+
+    Replacement for hamming_distance — works on variable-length strings.
+    """
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def jaccard_similarity(a: str, b: str) -> float:
+    """Token set overlap as a similarity score [0, 1].
+
+    Replacement for cosine similarity when no embedding model is available.
+    """
+    tokens_a = set(a.lower().split())
+    tokens_b = set(b.lower().split())
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    return len(intersection) / len(union) if union else 0.0
+
+
+# ── Artifact Metadata ─────────────────────────────────────────────────
+
+
+ARTIFACT_METADATA_FIELDS = (
+    "name",
+    "type",
+    "total_lines",
+    "total_chars",
+    "region_count",
+    "size_mb",
+    "last_modified",
+)
+
+# (Not a dataclass to avoid import overhead for simple consumers)
+
+
+def compute_artifact_meta(
+    name: str,
+    artifact_type: Literal["soul", "skill", "generic"],
+    text: str,
+    region_count: int = 0,
+    last_modified: float = 0.0,
+) -> dict:
+    """Compute an ArtifactMeta dict from raw artifact text."""
+    lines = text.splitlines()
+    return {
+        "name": name,
+        "type": artifact_type,
+        "total_lines": len(lines),
+        "total_chars": len(text),
+        "region_count": region_count,
+        "size_mb": len(text) / (1024 * 1024),
+        "last_modified": last_modified,
+    }
+
+
+# ── Category Scoring ──────────────────────────────────────────────────
+
+
+@dataclass
+class CategoryScores:
+    """Multi-dimensional quality scores for a single artifact version."""
+
+    structural_coherence: float = 0.0
+    failure_coverage: float = 0.0
+    conciseness: float = 0.0
+    actionability: float = 0.0
+
+    @property
+    def composite(self) -> float:
+        """Weighted composite score [0, 1]."""
+        return (
+            0.25 * self.structural_coherence
+            + 0.35 * self.failure_coverage
+            + 0.20 * self.conciseness
+            + 0.20 * self.actionability
+        )
+
+    @property
+    def weights(self) -> dict[str, float]:
+        return {
+            "structural_coherence": 0.25,
+            "failure_coverage": 0.35,
+            "conciseness": 0.20,
+            "actionability": 0.20,
+        }
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "structural_coherence": self.structural_coherence,
+            "failure_coverage": self.failure_coverage,
+            "conciseness": self.conciseness,
+            "actionability": self.actionability,
+            "composite": self.composite,
+        }
+
+    def __getitem__(self, key: str) -> float:
+        return getattr(self, key)
+
+
+# ── Multiplier Tracking ───────────────────────────────────────────────
+
+
+@dataclass
+class MultiplierEntry:
+    """Directional improvement ratio per category for one round."""
+
+    multipliers: dict[str, float]  # category_name → improvement ratio
+
+    @property
+    def overall(self) -> float:
+        """Weighted-average overall multiplier."""
+        if not self.multipliers:
+            return 0.0
+        w = CategoryScores().weights
+        return sum(
+            w.get(k, 0.2) * v for k, v in self.multipliers.items()
+        )
+
+
+def compute_multipliers(
+    before: CategoryScores,
+    after: CategoryScores,
+    epsilon: float = 1e-6,
+    cap: float = 5.0,
+) -> MultiplierEntry:
+    """Compute per-category improvement multipliers.
+
+    multiplier[k] = (score_t - score_{t-1}) / max(score_{t-1}, epsilon)
+
+    Results are capped to ±cap to prevent extreme values.
+    """
+    m: dict[str, float] = {}
+    for key in ("structural_coherence", "failure_coverage", "conciseness", "actionability"):
+        prev = getattr(before, key)
+        curr = getattr(after, key)
+        if abs(prev) < epsilon:
+            m[key] = 0.0
+        else:
+            m[key] = max(-cap, min(cap, (curr - prev) / prev))
+    return MultiplierEntry(multipliers=m)
+
+
+# ── Convergence State ─────────────────────────────────────────────────
+
+
+CONVERGENCE_THRESHOLD = 0.95
+GAIN_THRESHOLD = 0.02
+STABILITY_WINDOW = 2
+REDUNDANCY_THRESHOLD = 0.3
+
+
+@dataclass
+class ConvergenceSignal:
+    """State for one convergence signal."""
+
+    name: str
+    weight: float = 0.0
+    value: float = 0.0
+    stable_for: int = 0  # consecutive rounds meeting threshold
+    active: bool = False
+
+
+# ── Existing Models (v1 compatibility) ────────────────────────────────
+
+
 @dataclass
 class LearningLogEntry:
-    """A single mutation attempt with its observed outcome.
-
-    Modeled after Darwinian Evolver's LearningLogEntry.
-    """
+    """A single mutation attempt with its observed outcome."""
 
     attempted_change: str
-    """What the mutator tried to do (concise diff-style description)."""
-
     observed_outcome: str
-    """What actually happened — improvement, regression, or neutral."""
-
     severity_before: int = 0
-    """Failure severity before the change (0=low, 1=medium, 2=high)."""
-
     severity_after: int = 0
-    """Failure severity after the change."""
-
     change_summary: str = ""
-    """Structured summary of the change for LLM consumption."""
+    # v2 extensions
+    artifact_snippet: str = ""   # first 200 chars of artifact at this point
+    categories: str = ""         # JSON-serialized CategoryScores
+    multiplier: str = ""         # JSON-serialized MultiplierEntry
 
 
 @dataclass
@@ -40,8 +244,8 @@ class FailureTrace:
     agent_response: str = ""
     skill_name: str = ""
     context: str = ""
-    severity: int = 0  # 0=low, 1=medium, 2=high
-    failure_type: str = "general"  # For weighted sampling
+    severity: int = 0
+    failure_type: str = "general"
 
 
 @dataclass
@@ -55,15 +259,24 @@ class ContrastiveTraces:
     learning_log: list[LearningLogEntry] = field(default_factory=list)
 
 
-# Failure type weights for sampling
-# Higher weight = more likely to be sampled
-DEFAULT_FAILURE_TYPE_WEIGHTS: dict[str, float] = {
-    "protocol_violation": 2.0,  # Most important
-    "general": 1.0,
-    "tool_failure": 0.5,  # Less actionable for prompt improvements
-}
+@dataclass
+class OptimizeResult:
+    """Immutable optimization outcome."""
 
-# Severity labels for output
+    artifact: str
+    rounds: int
+    failures_found: int
+    converged: bool
+    failure_summary: str
+    learning_log: list[LearningLogEntry]
+    # v2 extensions
+    composite_score: float = 0.0
+    categories: str = ""  # JSON-serialized list of CategoryScores
+    multipliers: str = ""  # JSON-serialized list of MultiplierEntry
+
+
+# ── Severity Labels ───────────────────────────────────────────────────
+
 SEVERITY_LABELS: dict[int, str] = {
     0: "LOW",
     1: "MEDIUM",

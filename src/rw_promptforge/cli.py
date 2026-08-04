@@ -1,4 +1,4 @@
-"""CLI entry point. Thin — delegates to optimize commands."""
+"""CLI entry point — delegates to optimizer."""
 
 import click
 from rich.console import Console
@@ -29,12 +29,8 @@ def main() -> None:
     default="openai",
     help="LLM provider for the reflection step.",
 )
-@click.option(
-    "--endpoint", default=None, help="Custom OpenAI-compatible endpoint URL."
-)
-@click.option(
-    "--model", default="gpt-4o-mini", help="Model for reflection LLM."
-)
+@click.option("--endpoint", default=None, help="Custom OpenAI-compatible endpoint URL.")
+@click.option("--model", default="gpt-4o-mini", help="Model for reflection LLM.")
 @click.option(
     "--max-rounds",
     default=3,
@@ -42,15 +38,22 @@ def main() -> None:
     help="Max reflection rounds (default: 3, max: 20).",
 )
 @click.option(
-    "--eval-command",
-    required=True,
-    help="Shell command to evaluate candidate. Use {path} placeholder. Exit 0 = pass.",
-)
-@click.option(
     "--save",
     is_flag=True,
     default=False,
     help="Save optimized output to {path}.optimized.",
+)
+@click.option(
+    "--learning-log",
+    type=click.Choice(["none", "ancestors", "neighborhood-2"], case_sensitive=False),
+    default="none",
+    help="Learning log strategy (default: none).",
+)
+@click.option(
+    "--post-mutation-verify",
+    is_flag=True,
+    default=False,
+    help="Enable post-mutation verification filter.",
 )
 def optimize(
     path: str,
@@ -59,11 +62,11 @@ def optimize(
     endpoint: str | None,
     model: str,
     max_rounds: int,
-    eval_command: str,
     save: bool,
+    learning_log: str,
+    post_mutation_verify: bool,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
-    from rw_promptforge.evaluator.shell import ShellEvaluator
     from rw_promptforge.optimizer import Optimizer
     from rw_promptforge.provider import Provider
     from rw_promptforge.reflector.engine import Reflector
@@ -76,7 +79,6 @@ def optimize(
     # Build provider
     import os
     if endpoint:
-        # Read API key from env — try common patterns
         api_key = (
             os.environ.get("OPENROUTER_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
@@ -87,21 +89,24 @@ def optimize(
     else:
         provider_obj = Provider.from_env(model=model)
 
-    evaluator = ShellEvaluator(command_template=eval_command)
     reflector = Reflector(provider_obj)
 
     output = path + ".optimized" if save else None
     optimizer = Optimizer(
         provider=provider_obj,
-        evaluator=evaluator,
         reflector=reflector,
-        eval_command=eval_command,
         max_rounds=max_rounds,
         output_path=output,
+        learning_log_strategy=learning_log,
+        post_mutation_verify=post_mutation_verify,
     )
 
     console.print("\n[bold]Optimizing...[/bold]")
-    result = optimizer.optimize(path)
+
+    if target_type == "skill":
+        result = optimizer.optimize_skill(path, skill_name=path.split("/")[-1])
+    else:  # soul
+        result = optimizer.optimize_soul(path)
 
     if result.converged:
         console.print(
@@ -112,17 +117,15 @@ def optimize(
             f"\n[bold yellow]⚠️  Did not converge after {result.rounds} rounds[/bold yellow]"
         )
 
-    for rnum, eval_res in result.history:
-        status = "PASS" if eval_res.passed else "FAIL"
-        color = "green" if eval_res.passed else "red"
-        console.print(
-            f"  Round {rnum}: [{color}]{status}[/{color}]"
-            f" (exit={eval_res.exit_code}, {eval_res.elapsed:.1f}s)"
-        )
+    console.print(f"\nFailures found: {result.failures_found}")
+
+    if result.learning_log:
+        console.print("\n[bold]Learning Log:[/bold]")
+        for entry in result.learning_log:
+            console.print(f"  - {entry.attempted_change[:70]}...")
+            console.print(f"    Outcome: {entry.observed_outcome}")
 
     if save and output:
-        console.print(
-            f"\n[bold]Output saved to:[/bold] [cyan]{output}[/cyan]"
-        )
+        console.print(f"\n[bold]Output saved to:[/bold] [cyan]{output}[/cyan]")
 
     provider_obj.close()
