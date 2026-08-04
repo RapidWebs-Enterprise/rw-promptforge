@@ -65,7 +65,6 @@ class Provider:
           - OPENAI_ENDPOINT (for custom endpoints)
           - OPENROUTER_API_KEY (for https://openrouter.ai/api/v1)
         """
-        import os
 
         api_key = os.environ.get("OPENAI_API_KEY", "")
         endpoint = os.environ.get("OPENAI_ENDPOINT")

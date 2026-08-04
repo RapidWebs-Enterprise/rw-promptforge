@@ -18,6 +18,7 @@ def test_provider_import():
 
 def test_provider_from_env():
     import os
+
     from rw_promptforge.provider import Provider
 
     os.environ["OPENROUTER_API_KEY"] = "sk-test-123"
@@ -58,9 +59,12 @@ def test_soul_target():
 
 
 def test_reflector_import():
-    from rw_promptforge.reflector.engine import REFLECTION_SYSTEM_PROMPT, REFLECTION_USER_TEMPLATE, Reflector
-
     from rw_promptforge.provider import Provider
+    from rw_promptforge.reflector.engine import (
+        REFLECTION_SYSTEM_PROMPT,
+        REFLECTION_USER_TEMPLATE,
+        Reflector,
+    )
 
     reflector = Reflector(Provider())
     assert reflector is not None

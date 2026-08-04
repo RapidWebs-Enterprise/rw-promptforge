@@ -62,7 +62,10 @@ class SkillTarget:
 
     @property
     def triggers(self) -> list[str]:
-        return self.frontmatter.get("triggers", [])
+        raw = self.frontmatter.get("triggers", [])
+        if isinstance(raw, str):
+            return [raw]
+        return raw
 
     def estimate_tokens(self) -> int:
         return len(self.content) // 4

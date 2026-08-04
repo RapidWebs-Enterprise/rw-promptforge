@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from rw_promptforge.provider import Provider
 
-REFLECTION_SYSTEM_PROMPT = """You are a prompt engineering expert who specializes in improving prompts and skill definitions for LLM-based agent systems.
+REFLECTION_SYSTEM_PROMPT = """You are a prompt engineering expert who specializes in improving prompts and skill definitions for LLM-based agent systems.  # noqa: E501
 
-Your task: given a CURRENT artifact (a skill or prompt file), a FAILURE TRACE showing what went wrong when the artifact was used, and optional SESSION DATA showing real-world usage patterns, produce an IMPROVED version of the artifact.
+Your task: given a CURRENT artifact (a skill or prompt file), a FAILURE TRACE showing what went wrong when the artifact was used, and optional SESSION DATA showing real-world usage patterns, produce an IMPROVED version of the artifact.  # noqa: E501
 
 Rules:
 1. Keep the same structure and format. Do not rewrite from scratch — preserve what works.
@@ -71,7 +71,7 @@ class Reflector:
         user_prompt = REFLECTION_USER_TEMPLATE.format(
             artifact=artifact,
             trace=trace,
-            session_data=session_context,
+            session_context=session_context,
             history=history,
         )
         return self.provider.reflect(

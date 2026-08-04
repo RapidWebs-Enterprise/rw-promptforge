@@ -8,7 +8,6 @@ Reads the SQLite database at ~/.hermes/session_db/ (or custom path) to find:
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +41,9 @@ class SessionDBReader:
         # TODO: query once we know the actual session_db schema
         return []
 
-    def find_corrections_after_skill_use(self, skill_name: str, limit: int = 10) -> list[SessionMatch]:
+    def find_corrections_after_skill_use(
+        self, skill_name: str, limit: int = 10
+    ) -> list[SessionMatch]:
         """Find user corrections that happened after loading a skill.
 
         These are prime optimization targets. The pattern:

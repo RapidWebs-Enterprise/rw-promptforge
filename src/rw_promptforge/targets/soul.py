@@ -46,14 +46,6 @@ class SoulTarget:
             self._content = self.path.read_text()
         return self._content
 
-    def extract_section(self, name: str) -> str | None:
-        """Extract a named section from SOUL.md by its `<name>` marker."""
-        content = self.content
-        marker = f'<section name="{name}"'
-        if marker not in content:
-            marker = f"name={name}"
-        return None  # TODO: implement extraction after TDD
-
     def estimate_tokens(self) -> int:
         """Rough token count (4 chars ≈ 1 token)."""
         return len(self.content) // 4
