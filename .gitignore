@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.whl
+
+# Virtualenv
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.out
+
+# Project-specific
+*.tmp
+.rw-promptforge-cache/
