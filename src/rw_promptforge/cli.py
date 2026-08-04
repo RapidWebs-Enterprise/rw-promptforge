@@ -55,7 +55,7 @@ def main() -> None:
 def optimize(
     path: str,
     target_type: str,
-    provider_name: str,
+    provider: str,
     endpoint: str | None,
     model: str,
     max_rounds: int,
@@ -70,12 +70,19 @@ def optimize(
 
     console.print(f"[bold]rw-promptforge[/] v{__version__}")
     console.print(f"Target: [cyan]{target_type}[/] | Path: [cyan]{path}[/]")
-    info = f"Provider: [cyan]{provider_name}[/] | Model: [cyan]{model}[/]"
+    info = f"Provider: [cyan]{provider}[/] | Model: [cyan]{model}[/]"
     console.print(f"{info} | Max rounds: [cyan]{max_rounds}[/]")
 
     # Build provider
+    import os
     if endpoint:
-        api_key = ""
+        # Read API key from env — try common patterns
+        api_key = (
+            os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("GROQ_API_KEY")
+            or ""
+        )
         provider_obj = Provider(endpoint=endpoint, model=model, api_key=api_key)
     else:
         provider_obj = Provider.from_env(model=model)
