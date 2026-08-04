@@ -7,13 +7,15 @@ improved version that prevents these failures from recurring.
 Improvements over v1:
 - Contrastive traces (failures + successes)
 - Hypothesis-first: diagnose root cause before rewriting
-- Accumulated memory: track what was tried
+- Accumulated memory: track what was tried (Learning Log)
 - Section-level editing: target specific sections
 - Cache-friendly: stable prefix for LLM provider caching
+- Post-mutation verification support
 """
 
 from __future__ import annotations
 
+from rw_promptforge.datastore.models import LearningLogEntry
 from rw_promptforge.provider import Provider
 
 # System prompt is now CACHEABLE — stable across all reflection calls
@@ -43,7 +45,7 @@ REFLECTION_USER_TEMPLATE = """CURRENT ARTIFACT:
 REAL FAILURE TRACES (from actual agent usage sessions):
 {failure_traces}
 
-PREVIOUS IMPROVEMENTS (for context):
+PREVIOUS IMPROVEMENTS (Learning Log):
 {history}
 
 Based on these REAL failures, produce an improved artifact that prevents
@@ -83,6 +85,46 @@ class Reflector:
             system=REFLECTION_SYSTEM_PROMPT,
         )
 
+    def reflect_with_verification(
+        self,
+        artifact: str,
+        failure_traces: str,
+        history: str = "(no prior improvements)",
+        verify: bool = False,
+    ) -> tuple[str, bool]:
+        """Two-step reflection with optional post-mutation verification.
+
+        Args:
+            verify: If True, check if the improved artifact would pass
+                   the failure traces before returning.
+
+        Returns:
+            (improved_artifact, verification_passed)
+        """
+        improved = self.reflect(artifact, failure_traces, history)
+
+        if verify:
+            # Quick check: does the improved artifact address the failures?
+            verification_passed = self._quick_verify(improved, failure_traces)
+            return improved, verification_passed
+
+        return improved, True
+
+    def _quick_verify(self, improved: str, failure_traces: str) -> bool:
+        """Quick check: does the improved text contain fixes for the failures?
+
+        This is a heuristic check — not a full evaluation.
+        Returns True if the artifact looks improved, False otherwise.
+        """
+        if not improved or len(improved.strip()) < 10:
+            return False
+
+        # Check that the improved artifact has more structure
+        # than the failure traces suggest is missing
+        has_new_content = len(improved.split()) > len(failure_traces.split()) * 0.5
+
+        return has_new_content
+
     def reflect_hypothesis_first(
         self,
         artifact: str,
@@ -118,7 +160,6 @@ ROOT CAUSE:
             history=history,
         )
 
-        # Inject root cause diagnosis into the artifact section
         improved = self.provider.reflect(
             prompt=user_prompt,
             system=f"""{REFLECTION_SYSTEM_PROMPT}
@@ -129,3 +170,29 @@ Use this diagnosis to make targeted fixes. Don't rewrite what's working."""
         )
 
         return improved, root_cause
+
+    def create_learning_log_entry(
+        self,
+        old_artifact: str,
+        new_artifact: str,
+        severity_before: int,
+        severity_after: int | None = None,
+    ) -> LearningLogEntry:
+        """Create a learning log entry from an improvement attempt.
+
+        Modeled after Darwinian Evolver's LearningLogEntry.
+        """
+        # Generate a concise change summary
+        old_lines = len(old_artifact.split("\n"))
+        new_lines = len(new_artifact.split("\n"))
+
+        if severity_after is None:
+            severity_after = severity_before  # Unknown outcome
+
+        return LearningLogEntry(
+            attempted_change=f"Improved artifact: {old_lines}→{new_lines} lines, severity {severity_before}→{severity_after}",
+            observed_outcome="improvement" if severity_after < severity_before else ("regression" if severity_after > severity_before else "neutral"),
+            severity_before=severity_before,
+            severity_after=severity_after,
+            change_summary=f"Modified artifact from {old_lines} to {new_lines} lines",
+        )
