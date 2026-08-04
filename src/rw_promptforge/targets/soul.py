@@ -49,3 +49,25 @@ class SoulTarget:
     def estimate_tokens(self) -> int:
         """Rough token count (4 chars ≈ 1 token)."""
         return len(self.content) // 4
+
+    def extract_armored_sections(self) -> dict[str, str]:
+        """Extract ARMORED section contents as text.
+
+        Returns dict of section_name → section_content.
+        Returns empty dict if no section tags found.
+        """
+        result: dict[str, str] = {}
+        artifact = self.content
+
+        for section_name in self.ARMORED_SECTIONS:
+            pattern = f'<section name="{section_name}">'
+            start = artifact.find(pattern)
+            if start == -1:
+                continue
+            end_tag = artifact.find("</section>", start)
+            if end_tag == -1:
+                continue
+            content_start = start + len(pattern)
+            result[section_name] = artifact[content_start:end_tag].strip()
+
+        return result

@@ -1,11 +1,11 @@
 """Optimizer — the core evaluate-reflect-improve loop.
 
-Implements patterns from Darwinian Evolver:
-- Learning Log: track mutation attempts and outcomes
-- Post-Mutation Verification: filter bad mutations early
-- Weighted Failure Sampling: bias toward critical failures
-
-Uses REAL failure traces from Hermes session_db to improve skills and SOUL.md.
+Implements the RefineStop v2 algorithm:
+- Multi-dimensional scoring (4 categories)
+- Forward/reverse audit loop
+- Convergence detection (fixed math)
+- Redundancy/diminishing returns detection
+- ARMORED section protection
 """
 
 from __future__ import annotations
@@ -13,52 +13,50 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from rw_promptforge.datastore.models import LearningLogEntry
+from rw_promptforge.datastore.models import (
+    FailureTrace,
+    LearningLogEntry,
+    OptimizeResult,
+    CategoryScores,
+    MultiplierEntry,
+    compute_multipliers,
+    compute_artifact_meta,
+    truncate_artifact,
+    MAX_ARTIFACT_CHARS,
+    MAX_ROUNDS_CAP,
+    MAX_EFFECTIVE_TRACES,
+    FAILURE_TYPE_WEIGHTS,
+    SIZE_MULTIPLIER_CAP,
+)
 from rw_promptforge.datastore.session_db import SessionDBReader
 from rw_promptforge.reflector.engine import Reflector
-
-MAX_ROUNDS_CAP = 20
-
-
-@dataclass
-class OptimizeResult:
-    """Immutable optimization outcome."""
-
-    artifact: str
-    """The final (best) artifact text."""
-
-    rounds: int
-    """Number of reflection rounds executed."""
-
-    failures_found: int
-    """Total failure traces found and fed to the reflector."""
-
-    converged: bool
-    """True if no failures were found (nothing to improve)."""
-
-    failure_summary: str
-    """Summary of all failure traces used."""
-
-    learning_log: list[LearningLogEntry]
-    """History of mutation attempts and outcomes."""
+from rw_promptforge.categories import score_categories, format_category_report
+from rw_promptforge.convergence import (
+    convergence_score,
+    is_converged,
+    check_redundancy,
+    check_semantic_stability,
+    format_convergence_report,
+)
+from rw_promptforge.auditor import reverse_audit, PASS, FAIL, REVIEW, extract_armored_sections
 
 
 class Optimizer:
-    """Session-db driven evaluate → reflect → improve loop.
-
-    For skills: finds real sessions where the skill was loaded and the agent failed.
-    For SOUL.md: finds protocol violations the agent committed despite instructions.
-    """
+    """Session-db driven evaluate → reflect → improve loop (v2 RefineStop)."""
 
     def __init__(
         self,
-        provider,  # Provider
+        provider,
         reflector: Reflector,
         max_rounds: int = 3,
         output_path: str | None = None,
         db_path: str | None = None,
         learning_log_strategy: str = "none",
         post_mutation_verify: bool = False,
+        semantic_threshold: float = 0.95,
+        gain_threshold: float = 0.02,
+        stability_threshold: float = 0.05,
+        min_rounds: int = 2,
     ) -> None:
         self.provider = provider
         self.reflector = reflector
@@ -67,200 +65,268 @@ class Optimizer:
         self.db = SessionDBReader(db_path)
         self.learning_log_strategy = learning_log_strategy
         self.post_mutation_verify = post_mutation_verify
+        self.semantic_threshold = semantic_threshold
+        self.gain_threshold = gain_threshold
+        self.stability_threshold = stability_threshold
+        self.min_rounds = min_rounds
         self._learning_log: list[LearningLogEntry] = []
+        self._score_history: list[CategoryScores] = []
+        self._multiplier_history: list[MultiplierEntry] = []
 
     def optimize_skill(
         self, artifact_path: str, skill_name: str
     ) -> OptimizeResult:
-        """Optimize a skill file using real session_db failure traces."""
+        """Optimize a skill file — unified entry point."""
+        return self._optimize(
+            artifact_path=artifact_path,
+            target_name=skill_name,
+            target_type="skill",
+            use_skill_traces=True,
+        )
+
+    def optimize_soul(self, artifact_path: str) -> OptimizeResult:
+        """Optimize a SOUL.md file."""
+        return self._optimize(
+            artifact_path=artifact_path,
+            target_name="soul",
+            target_type="soul",
+            use_skill_traces=False,
+        )
+
+    def _optimize(
+        self,
+        artifact_path: str,
+        target_name: str,
+        target_type: str,
+        use_skill_traces: bool,
+    ) -> OptimizeResult:
+        """Core v2 RefineStop loop."""
         artifact = Path(artifact_path).read_text()
-        history = []
+        original_size = len(artifact)
+
+        meta = compute_artifact_meta(
+            target_name, target_type, artifact,
+            region_count=0,  # will be parsed by target parser
+        )
+
+        history: list[str] = []
         total_failures = 0
+        prev_scores: CategoryScores | None = None
 
         for round_num in range(self.max_rounds):
-            # Query for real failures
-            traces = self.db.get_contrastive_summary(skill_name, limit=5)
-            failure_summary = self.db.format_contrastive_traces(traces)
+            # ── Query failure traces (v2 flat API) ──
+            traces = self.db.get_contrastive_traces(
+                target_name if use_skill_traces else None,
+                limit=MAX_EFFECTIVE_TRACES,
+                weights=FAILURE_TYPE_WEIGHTS,
+                round_number=round_num,
+            )
+            failure_summary = self.db.format_flat_traces(traces)
 
-            if "No relevant traces found" in failure_summary or "No failure traces found" in failure_summary:
+            # Check empty/early convergence
+            if self._is_empty_traces(failure_summary, traces):
                 return OptimizeResult(
                     artifact=artifact,
                     rounds=round_num,
                     failures_found=total_failures,
                     converged=True,
-                    failure_summary="No relevant failures found in session history.",
+                    failure_summary="No relevant failures found.",
                     learning_log=list(self._learning_log),
                 )
 
             # Count failures
             failure_count = failure_summary.count("### [")
-            total_failures += failure_count
-
-            # Reflect on real failures
+            total_failures += max(failure_count, 1)
             history_text = "\n".join(history) if history else "(first iteration)"
 
-            # Add learning log if strategy is enabled
+            # Add learning log
             if self.learning_log_strategy != "none" and self._learning_log:
                 log_entries = self._format_learning_log()
                 history_text = f"LEARNING LOG:\n{log_entries}\n\n{history_text}"
 
+            # ── Reflect ──
             old_artifact = artifact
-            severity_before = max((t.severity for t in traces.failures), default=0)
+            severity_before = self._max_severity(traces)
 
+            truncated = truncate_artifact(artifact, MAX_ARTIFACT_CHARS)
+            size_budget = int(original_size * SIZE_MULTIPLIER_CAP)
             artifact = self.reflector.reflect(
-                artifact=artifact,
+                artifact=truncated,
                 failure_traces=failure_summary,
                 history=history_text,
+                size_budget=size_budget,
             )
 
-            # Guard: reject empty/suspicious output
+            # Guard: reject empty/suspicious
             if not artifact or len(artifact.strip()) < 10:
                 break
 
-            # Post-mutation verification
+            # ── Score candidate ──
+            scores = score_categories(artifact, failure_summary)
+            multipliers = compute_multipliers(prev_scores or scores, scores)
+            self._score_history.append(scores)
+            self._multiplier_history.append(multipliers)
+
+            # ── Reverse audit ──
+            recent_snippets = [e.artifact_snippet for e in self._learning_log[-3:]]
+            audit = reverse_audit(
+                artifact_path=artifact_path if target_type == "soul" else None,
+                old_artifact=old_artifact,
+                new_artifact=artifact,
+                failure_traces=failure_summary,
+                original_size=original_size,
+                recent_snippets=recent_snippets,
+            )
+
+            if audit == FAIL:
+                # Revert and continue
+                outcome = "rejected"
+                self._learning_log.append(
+                    LearningLogEntry(
+                        attempted_change=f"Round {round_num + 1}",
+                        observed_outcome=outcome,
+                        severity_before=severity_before,
+                        severity_after=severity_before,
+                        change_summary=format_category_report(prev_scores or scores, scores),
+                        artifact_snippet=artifact[:200],
+                    )
+                )
+                artifact = old_artifact
+                continue
+
+            if audit == REVIEW:
+                # Human review needed — stop and flag
+                outcome = "review_needed"
+                self._learning_log.append(
+                    LearningLogEntry(
+                        attempted_change=f"Round {round_num + 1} (needs review)",
+                        observed_outcome=outcome,
+                        severity_before=severity_before,
+                        severity_after=severity_before,
+                        change_summary=format_category_report(prev_scores or scores, scores),
+                        artifact_snippet=artifact[:200],
+                    )
+                )
+                break
+
+            # ── Post-mutation verification ──
             if self.post_mutation_verify:
                 improved, verified = self.reflector.reflect_with_verification(
                     old_artifact, failure_summary, history_text, verify=True
                 )
                 if not verified:
-                    # Keep old artifact, log the failed attempt
+                    outcome = "rejected"
                     self._learning_log.append(
                         LearningLogEntry(
-                            attempted_change="Reflected on failures",
-                            observed_outcome="rejected",
+                            attempted_change=f"Round {round_num + 1} (failed verification)",
+                            observed_outcome=outcome,
                             severity_before=severity_before,
                             severity_after=severity_before,
+                            artifact_snippet=artifact[:200],
                         )
                     )
+                    artifact = old_artifact
                     continue
                 artifact = improved
 
-            # Record learning log entry
-            severity_after = severity_before  # Simplified — would need re-eval for real value
+            # ── Accept ──
+            severity_after = severity_before  # simplified
+            outcome = "improvement" if severity_after < severity_before else "neutral"
+
             self._learning_log.append(
-                self.reflector.create_learning_log_entry(
-                    old_artifact,
-                    artifact,
-                    severity_before,
-                    severity_after,
+                LearningLogEntry(
+                    attempted_change=f"Round {round_num + 1}",
+                    observed_outcome=outcome,
+                    severity_before=severity_before,
+                    severity_after=severity_after,
+                    change_summary=format_category_report(prev_scores or scores, scores),
+                    artifact_snippet=artifact[:200],
+                    categories=str(scores.as_dict()),
+                    multiplier=str(multipliers.multipliers),
                 )
             )
+            prev_scores = scores
+            history.append(f"Round {round_num + 1}: score {scores.composite:.2f}")
 
-            history.append(f"Round {round_num + 1}: fixed {failure_count} failures")
-
-        # Save output if configured
-        if self.output_path and artifact:
-            self.output_path.write_text(artifact)
-
-        return OptimizeResult(
-            artifact=artifact,
-            rounds=self.max_rounds,
-            failures_found=total_failures,
-            converged=False,
-            failure_summary="\n".join(history),
-            learning_log=list(self._learning_log),
-        )
-
-    def optimize_soul(
-        self, artifact_path: str
-    ) -> OptimizeResult:
-        """Optimize SOUL.md using real protocol violation traces."""
-        artifact = Path(artifact_path).read_text()
-        history = []
-        total_failures = 0
-
-        for round_num in range(self.max_rounds):
-            # Query for protocol violations
-            violations = self.db.find_protocol_violations(limit=10)
-            corrections = self.db.find_corrections(limit=5)
-
-            if not violations and not corrections:
-                return OptimizeResult(
-                    artifact=artifact,
-                    rounds=round_num,
-                    failures_found=total_failures,
-                    converged=True,
-                    failure_summary="No protocol violations or corrections found.",
-                    learning_log=list(self._learning_log),
-                )
-
-            # Build failure summary for SOUL.md
-            sections = []
-            if violations:
-                sections.append("## PROTOCOL VIOLATIONS")
-                for v in violations:
-                    sections.append(
-                        f"### Violation in session {v.session_id}\n"
-                        f"{v.what_happened[:400]}"
-                    )
-            if corrections:
-                sections.append("## USER CORRECTIONS")
-                for c in corrections:
-                    sections.append(
-                        f"### Correction in session {c.session_id}\n"
-                        f"What agent did: {c.what_happened[:200]}\n"
-                        f"User said: {c.user_correction[:200]}"
-                    )
-
-            failure_summary = "\n\n".join(sections)
-            failure_count = len(violations) + len(corrections)
-            total_failures += failure_count
-
-            # Reflect
-            history_text = "\n".join(history) if history else "(first iteration)"
-
-            # Add learning log if strategy is enabled
-            if self.learning_log_strategy != "none" and self._learning_log:
-                log_entries = self._format_learning_log()
-                history_text = f"LEARNING LOG:\n{log_entries}\n\n{history_text}"
-
-            old_artifact = artifact
-            severity_before = max(
-                [v.severity for v in violations] +
-                [c.severity for c in corrections],
-                default=0
-            )
-
-            artifact = self.reflector.reflect(
-                artifact=artifact,
-                failure_traces=failure_summary,
-                history=history_text,
-            )
-
-            if not artifact or len(artifact.strip()) < 10:
+            # ── Check redundancy ──
+            if check_redundancy(self._learning_log):
                 break
 
-            # Record learning log
-            self._learning_log.append(
-                self.reflector.create_learning_log_entry(
-                    old_artifact,
-                    artifact,
-                    severity_before,
-                    severity_before,  # Simplified
-                )
-            )
+            # ── Check gain saturation ──
+            if len(self._score_history) >= self.min_rounds:
+                sat = abs(scores.composite - (prev_scores or scores).composite) < self.gain_threshold
+                if sat:
+                    break
 
-            history.append(f"Round {round_num + 1}: addressed {failure_count} violations")
+            # ── Check convergence ──
+            if len(self._learning_log) >= self.min_rounds:
+                if is_converged(self._learning_log, self._multiplier_history):
+                    break
 
+        # ── Save output ──
         if self.output_path and artifact:
             self.output_path.write_text(artifact)
 
         return OptimizeResult(
             artifact=artifact,
-            rounds=self.max_rounds,
+            rounds=len(self._learning_log),
             failures_found=total_failures,
-            converged=False,
+            converged=is_converged(self._learning_log, self._multiplier_history),
             failure_summary="\n".join(history),
             learning_log=list(self._learning_log),
+            composite_score=prev_scores.composite if prev_scores else 0.0,
+            categories=str([s.as_dict() for s in self._score_history]),
+            multipliers=str([m.multipliers for m in self._multiplier_history]),
         )
+
+    # ── Helpers ──
+
+    def _is_empty_traces(self, failure_summary: str, traces: list) -> bool:
+        """Check if failure traces indicate no actionable data."""
+        if "No relevant traces found" in failure_summary or "No failure traces found" in failure_summary:
+            return True
+        if isinstance(traces, list) and len(traces) == 0:
+            return True
+        return False
+
+    def _max_severity(self, traces) -> int:
+        """Extract max severity from traces."""
+        if isinstance(traces, list):
+            return max((t.severity for t in traces), default=0)
+        return 0
+
+    def _format_soul_failures(self, violations, corrections) -> str:
+        """Format SOUL.md violations and corrections into summary text."""
+        sections = []
+        if violations:
+            sections.append("## PROTOCOL VIOLATIONS")
+            for v in violations:
+                sections.append(
+                    f"### Violation in session {v.session_id}\n"
+                    f"{v.what_happened[:400]}"
+                )
+        if corrections:
+            sections.append("## USER CORRECTIONS")
+            for c in corrections:
+                sections.append(
+                    f"### Correction in session {c.session_id}\n"
+                    f"What agent did: {c.what_happened[:200]}\n"
+                    f"User said: {c.user_correction[:200]}"
+                )
+        return "\n\n".join(sections)
+
+    def _build_traces(self, violations, corrections) -> list:
+        """Build a flat list of FailureTraces from separate sources."""
+        result = list(violations) if violations else []
+        result.extend(corrections) if corrections else None
+        return result
 
     def _format_learning_log(self) -> str:
         """Format learning log entries for the reflector prompt."""
         if not self._learning_log:
             return "(no prior learning)"
-
         entries = []
-        for entry in self._learning_log[-5:]:  # Last 5 entries
+        for entry in self._learning_log[-5:]:
             entries.append(
                 f"- {entry.attempted_change}: {entry.observed_outcome}"
             )

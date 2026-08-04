@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+EVAL_OUTPUT_MAX_CHARS = 4000
 import re
 import shlex
 import subprocess
@@ -68,6 +69,11 @@ class ShellEvaluator:
             if self.sanitize:
                 stdout = _sanitize(stdout)
                 stderr = _sanitize(stderr)
+            # Truncate to prevent context overflow
+            if len(stdout) > EVAL_OUTPUT_MAX_CHARS:
+                stdout = stdout[:EVAL_OUTPUT_MAX_CHARS] + f"\n... [output truncated at {EVAL_OUTPUT_MAX_CHARS} chars] ...\n"
+            if len(stderr) > EVAL_OUTPUT_MAX_CHARS:
+                stderr = stderr[:EVAL_OUTPUT_MAX_CHARS] + f"\n... [stderr truncated at {EVAL_OUTPUT_MAX_CHARS} chars] ...\n"
             return EvalResult(
                 exit_code=result.returncode,
                 stdout=stdout,

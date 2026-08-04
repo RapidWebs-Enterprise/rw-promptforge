@@ -64,6 +64,7 @@ class Reflector:
         artifact: str,
         failure_traces: str,
         history: str = "(no prior improvements)",
+        size_budget: int = 0,
     ) -> str:
         """Produce an improved artifact using real failure traces.
 
@@ -71,6 +72,7 @@ class Reflector:
             artifact: The original skill/SOUL.md text.
             failure_traces: Formatted failure traces from session_db.
             history: Track of improvements from prior reflection rounds.
+            size_budget: Max allowed output size (0 = no limit).
 
         Returns:
             The improved artifact text.
@@ -80,10 +82,18 @@ class Reflector:
             failure_traces=failure_traces,
             history=history,
         )
-        return self.provider.reflect(
+        result = self.provider.reflect(
             prompt=user_prompt,
             system=REFLECTION_SYSTEM_PROMPT,
         )
+
+        # Enforce size budget
+        if size_budget > 0 and len(result) > size_budget:
+            # Truncate with notice
+            half = size_budget // 2
+            result = result[:half] + "\n... [TRUNCATED] ...\n" + result[-half:]
+
+        return result
 
     def reflect_with_verification(
         self,

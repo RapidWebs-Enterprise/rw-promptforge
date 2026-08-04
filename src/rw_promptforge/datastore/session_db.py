@@ -17,8 +17,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from rw_promptforge.datastore.models import (
-    DEFAULT_FAILURE_TYPE_WEIGHTS,
+from rw_promptforge.datastore.models import (  # noqa: F401
+    FAILURE_TYPE_WEIGHTS as DEFAULT_FAILURE_TYPE_WEIGHTS,
     SEVERITY_LABELS,
     ContrastiveTraces,
     FailureTrace,
@@ -262,10 +262,19 @@ class SessionDBReader:
         sampled = random.sample(weighted_traces, min(len(traces), len(weighted_traces)))
         return sampled[:len(traces)]
 
-    def get_contrastive_summary(
-        self, skill_name: str | None = None, limit: int = 5
-    ) -> ContrastiveTraces:
-        """Get contrastive traces: failures + successes + root cause."""
+    def get_contrastive_traces(
+        self,
+        skill_name: str | None = None,
+        limit: int = 5,
+        weights: dict[str, float] | None = None,
+        round_number: int = 0,
+    ) -> list[FailureTrace]:
+        """Get flat list of weighted failure traces (v2 API).
+
+        Returns a flat list of FailureTrace objects sorted by
+        severity * weight, with round_factor and recency_factor applied.
+        This is the v2 replacement for get_contrastive_summary().
+        """
         corrections = self.find_corrections(skill_name, limit)
         violations = self.find_protocol_violations(limit // 2)
         failures = self.find_tool_failures(skill_name, limit // 2)
@@ -273,23 +282,33 @@ class SessionDBReader:
         all_failures = corrections + violations + failures
         all_failures.sort(key=lambda x: x.severity, reverse=True)
 
-        # Apply weighted sampling
-        sampled_failures = self.sample_failure_cases(all_failures)
+        import random
+        import time
 
-        successes = self.find_successes(limit)
+        now = time.time()
+        w = weights or self.failure_type_weights
 
-        return ContrastiveTraces(
-            failures=sampled_failures[:limit],
-            successes=successes,
-        )
+        # Apply multiplier: base_weight × round_factor × recency_factor
+        scored: list[tuple[FailureTrace, float]] = []
+        for t in all_failures:
+            base = w.get(t.failure_type, 1.0)
+            round_factor = 1.0 + (round_number * 0.1)
+            age_days = (now - t.timestamp) / 86400 if t.timestamp > 0 else 365
+            recency = 1.0 / (1.0 + min(age_days, 365))
+            score = base * round_factor * recency
+            scored.append((t, score))
 
-    def format_contrastive_traces(self, traces: ContrastiveTraces) -> str:
-        """Format contrastive traces for the reflector LLM."""
+        # Take top N by score
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [t for t, s in scored[:limit]]
+
+    def format_flat_traces(self, traces: list[FailureTrace]) -> str:
+        """Format a flat list of FailureTrace objects for the reflector LLM."""
         sections = []
 
-        if traces.failures:
+        if traces:
             sections.append("## FAILURES (what went wrong)")
-            for t in traces.failures:
+            for t in traces:
                 severity_label = SEVERITY_LABELS[t.severity]
                 sections.append(
                     f"### [{severity_label}] Session {t.session_id}\n"
@@ -298,29 +317,7 @@ class SessionDBReader:
                     f"User said: {t.user_correction[:200] if t.user_correction else t.context}"
                 )
 
-        if traces.successes:
-            sections.append("## SUCCESSES (what worked — preserve these)")
-            for s in traces.successes:
-                sections.append(f"- {s[:200]}")
-
-        if traces.root_cause:
-            sections.append(f"## ROOT CAUSE DIAGNOSIS\n{traces.root_cause}")
-
-        if traces.learning_log:
-            sections.append("## LEARNING LOG (past improvements)")
-            for entry in traces.learning_log[-3:]:  # Last 3 entries
-                sections.append(
-                    f"- {entry.attempted_change}: {entry.observed_outcome}"
-                )
-
         if not sections:
             return "No relevant traces found."
 
         return "\n\n".join(sections)
-
-    def get_failure_summary(
-        self, skill_name: str | None = None, limit: int = 5
-    ) -> str:
-        """Get a formatted failure summary for the reflector LLM."""
-        traces = self.get_contrastive_summary(skill_name, limit)
-        return self.format_contrastive_traces(traces)

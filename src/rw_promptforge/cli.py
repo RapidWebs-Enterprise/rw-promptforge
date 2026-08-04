@@ -55,6 +55,42 @@ def main() -> None:
     default=False,
     help="Enable post-mutation verification filter.",
 )
+@click.option(
+    "--hypothesis-first",
+    is_flag=True,
+    default=False,
+    help="Use 2-step reflection (diagnose → fix) for complex artifacts.",
+)
+@click.option(
+    "--semantic-threshold",
+    default=0.95,
+    type=float,
+    help="Cosine/Jaccard similarity threshold for convergence (default: 0.95).",
+)
+@click.option(
+    "--gain-threshold",
+    default=0.02,
+    type=float,
+    help="Minimum composite score gain to continue (default: 0.02).",
+)
+@click.option(
+    "--stability-threshold",
+    default=0.05,
+    type=float,
+    help="Max multiplier magnitude before considering category stable (default: 0.05).",
+)
+@click.option(
+    "--min-rounds",
+    default=2,
+    type=int,
+    help="Minimum rounds before convergence can trigger (default: 2).",
+)
+@click.option(
+    "--output",
+    default=None,
+    type=str,
+    help="Save optimized output to a separate file (instead of overwriting).",
+)
 def optimize(
     path: str,
     target_type: str,
@@ -65,6 +101,12 @@ def optimize(
     save: bool,
     learning_log: str,
     post_mutation_verify: bool,
+    hypothesis_first: bool,
+    semantic_threshold: float,
+    gain_threshold: float,
+    stability_threshold: float,
+    min_rounds: int,
+    output: str | None,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
     from rw_promptforge.optimizer import Optimizer
@@ -91,14 +133,18 @@ def optimize(
 
     reflector = Reflector(provider_obj)
 
-    output = path + ".optimized" if save else None
+    output_path = output or (path + ".optimized" if save else None)
     optimizer = Optimizer(
         provider=provider_obj,
         reflector=reflector,
         max_rounds=max_rounds,
-        output_path=output,
+        output_path=output_path,
         learning_log_strategy=learning_log,
         post_mutation_verify=post_mutation_verify,
+        semantic_threshold=semantic_threshold,
+        gain_threshold=gain_threshold,
+        stability_threshold=stability_threshold,
+        min_rounds=min_rounds,
     )
 
     console.print("\n[bold]Optimizing...[/bold]")
@@ -119,13 +165,17 @@ def optimize(
 
     console.print(f"\nFailures found: {result.failures_found}")
 
+    if result.categories:
+        console.print(f"\n[bold]Category Scores:[/bold]")
+        console.print(f"  Composite: {result.composite_score:.2f}")
+
     if result.learning_log:
         console.print("\n[bold]Learning Log:[/bold]")
-        for entry in result.learning_log:
-            console.print(f"  - {entry.attempted_change[:70]}...")
+        for entry in result.learning_log[-3:]:  # Last 3
+            console.print(f"  - {entry.attempted_change[:60]}...")
             console.print(f"    Outcome: {entry.observed_outcome}")
 
-    if save and output:
-        console.print(f"\n[bold]Output saved to:[/bold] [cyan]{output}[/cyan]")
+    if output_path:
+        console.print(f"\n[bold]Output saved to:[/bold] [cyan]{output_path}[/cyan]")
 
     provider_obj.close()
