@@ -1,26 +1,31 @@
 """Reflector: the LLM-based reflection step.
 
-Given a current artifact (skill/prompt), an evaluation trace, and optional
-historical session data, the reflector asks an LLM to propose an improved version.
+Given a current artifact (skill/SOUL.md), REAL failure traces from session_db,
+and the history of improvements, the reflector asks an LLM to produce an
+improved version that prevents these failures from recurring.
 
-This is the CORE of the Simplify-Reflect-Evolve loop.
+This is the CORE of the Simplify-Reflect-Evolve loop — and the key difference
+from a simple quality gate: we use REAL usage data, not synthetic evals.
 """
 
 from __future__ import annotations
 
 from rw_promptforge.provider import Provider
 
-REFLECTION_SYSTEM_PROMPT = """You are a prompt engineering expert who specializes in improving prompts and skill definitions for LLM-based agent systems.  # noqa: E501
+REFLECTION_SYSTEM_PROMPT = """You are an expert at improving LLM agent instructions.
+Your task: given a CURRENT artifact (a skill or SOUL.md), and REAL failure traces
+from actual agent usage sessions, produce an IMPROVED version that prevents
+these failures from recurring.
 
-Your task: given a CURRENT artifact (a skill or prompt file), a FAILURE TRACE showing what went wrong when the artifact was used, and optional SESSION DATA showing real-world usage patterns, produce an IMPROVED version of the artifact.  # noqa: E501
-
-Rules:
-1. Keep the same structure and format. Do not rewrite from scratch — preserve what works.
-2. Fix only what the failure trace reveals as broken.
-3. Add missing steps, clarify ambiguous instructions, and update outdated commands/tool names.
-4. Be specific: if a step was wrong, write the correct one. If a trigger was missing, add it.
-5. Return ONLY the improved artifact text. No explanation, no commentary.
-6. If the artifact has YAML frontmatter, preserve and update it.
+Key principles:
+1. Keep the same structure and format. Do not rewrite from scratch.
+2. Fix what the failure traces reveal as broken — be SPECIFIC.
+3. For skills: add missing steps, clarify ambiguous instructions, fix wrong commands.
+4. For SOUL.md: strengthen protocols that the agent keeps violating.
+5. If the agent keeps doing X despite instructions saying don't do X,
+   make those instructions MORE prominent, clearer, with concrete examples.
+6. Return ONLY the improved artifact. No explanation, no commentary, no code fences.
+7. If the artifact has YAML frontmatter, preserve and update it.
 """
 
 REFLECTION_USER_TEMPLATE = """CURRENT ARTIFACT:
@@ -28,24 +33,19 @@ REFLECTION_USER_TEMPLATE = """CURRENT ARTIFACT:
 {artifact}
 ```
 
-PREVIOUS VERSIONS (for context):
-```
+REAL FAILURE TRACES (from actual agent usage sessions):
+{failure_traces}
+
+PREVIOUS IMPROVEMENTS (for context):
 {history}
-```
 
-EVALUATION TRACE:
-```
-{trace}
-```
-
-SESSION DATA (real-world failures involving this artifact):
-{session_context}
-
-Produce the improved artifact:"""
+Based on these REAL failures, produce an improved artifact that prevents
+these specific failures from recurring. Be targeted — fix what's broken,
+don't rewrite everything."""
 
 
 class Reflector:
-    """LLM-powered reflection engine — reads traces, proposes fixes."""
+    """LLM-powered reflection engine — reads real traces, proposes fixes."""
 
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
@@ -53,25 +53,22 @@ class Reflector:
     def reflect(
         self,
         artifact: str,
-        trace: str,
-        session_context: str = "(no session data available)",
-        history: str = "(no prior versions)",
+        failure_traces: str,
+        history: str = "(no prior improvements)",
     ) -> str:
-        """Produce an improved artifact using the reflection LLM.
+        """Produce an improved artifact using real failure traces.
 
         Args:
-            artifact: The original skill/prompt text.
-            trace: Evaluation failure output.
-            session_context: Extra context from session_db queries.
-            history: Track of changes from prior reflection rounds.
+            artifact: The original skill/SOUL.md text.
+            failure_traces: Formatted failure traces from session_db.
+            history: Track of improvements from prior reflection rounds.
 
         Returns:
-            The LLM field response — ideally the improved artifact text.
+            The improved artifact text.
         """
         user_prompt = REFLECTION_USER_TEMPLATE.format(
             artifact=artifact,
-            trace=trace,
-            session_context=session_context,
+            failure_traces=failure_traces,
             history=history,
         )
         return self.provider.reflect(

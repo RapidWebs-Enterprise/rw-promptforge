@@ -52,7 +52,7 @@ class Provider:
                         "model": self.model,
                         "messages": messages,
                         "temperature": 0.3,
-                        "max_tokens": 4000,
+                        "max_tokens": 8000,
                     },
                 )
                 response.raise_for_status()
