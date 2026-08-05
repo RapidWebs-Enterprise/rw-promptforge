@@ -39,6 +39,16 @@ class TestReverseAudit:
         normal = "x" * 140  # 1.4x original
         assert reverse_audit(None, "old", normal, original_size=100) == PASS
 
+    def test_size_cap_configurable(self):
+        """Custom size_cap relaxes or tightens the growth limit."""
+        medium = "x" * 180  # 1.8x original
+        # Default 1.5 → fail
+        assert reverse_audit(None, "old", medium, original_size=100) == FAIL
+        # size_cap=2.0 → pass
+        assert reverse_audit(None, "old", medium, original_size=100, size_cap=2.0) == PASS
+        # size_cap=1.0 → even 1.1x fails
+        assert reverse_audit(None, "old", "x" * 110, original_size=100, size_cap=1.0) == FAIL
+
     def test_stagnation_detection(self):
         """Very similar entries with stagnation = fail."""
         old = "same content"
