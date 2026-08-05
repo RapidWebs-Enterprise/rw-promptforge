@@ -55,6 +55,7 @@ from rw_promptforge.auditor import (
     REVIEW,
     extract_armored_sections,
     merge_artifact_sections,
+    _replace_section_content,
 )
 from rw_promptforge.evaluator.metrics import batch_score
 

@@ -334,6 +334,8 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
                     prompt=user_prompt,
                     system=self.SECTION_REFINE_SYSTEM_PROMPT,
                 ).strip()
+                # Strip markdown code fences models often wrap output in
+                result = _strip_code_fences(result)
                 # Enforce per-section size budget (relative to original section)
                 if size_budget > 0 and len(result) > size_budget:
                     half = size_budget // 2
@@ -343,3 +345,19 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
             except Exception:
                 continue  # keep original section on failure
         return improved
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove ```...``` fences but KEEP the content between them."""
+    if "```" not in text:
+        return text
+    lines = text.splitlines()
+    out: list[str] = []
+    in_fence = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        out.append(line)
+    return "\n".join(out).strip()

@@ -73,6 +73,14 @@ class TestChunkedReflection:
         assert "skill_gate" in improved
         assert "IMPROVED SECTION" in improved["machine_protocol"]
 
+    def test_reflect_sections_strips_code_fences(self, judge_provider, reflector):
+        """Models often wrap section output in ``` fences — must be stripped."""
+        judge_provider.reflect = lambda prompt, system=None: "```markdown\nIMPROVED CONTENT\n```"
+
+        sections = [("protocol", "a", "ORIG A")]
+        improved = reflector.reflect_sections(sections, "failures")
+        assert improved["a"] == "IMPROVED CONTENT"
+
     def test_reflect_sections_empty_content_skipped(self, reflector):
         sections = [("protocol", "empty_section", "   ")]
         improved = reflector.reflect_sections(sections, "failures")
