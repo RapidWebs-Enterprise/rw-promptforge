@@ -310,18 +310,26 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
         failure_traces: str,
         history: str = "(no prior improvements)",
         size_budget: int = 0,
+        max_workers: int = 8,
     ) -> dict[str, str]:
         """Refine each section independently, return {section_name: new_content}.
 
         Chunked reflection: a full 50KB artifact cannot be meaningfully
         rewritten in one 8K-token call (models echo the input verbatim).
         Refining each section separately makes every call small enough for
-        a real rewrite. Sections are keyed by name.
+        a real rewrite. Sections are refined CONCURRENTLY (independent
+        calls) — 23 sections take ~4 rounds of 8 parallel calls instead of
+        23 sequential round-trips. Sections are keyed by name.
         """
+        tasks: list[tuple[str, str, str]] = [
+            (tag, name, content)
+            for tag, name, content in sections
+            if content.strip()
+        ]
         improved: dict[str, str] = {}
-        for tag, name, content in sections:
-            if not content.strip():
-                continue
+
+        def _refine_one(task: tuple[str, str, str]) -> tuple[str, str] | None:
+            tag, name, content = task
             user_prompt = self.SECTION_REFINE_USER_TEMPLATE.format(
                 tag=tag,
                 name=name,
@@ -341,9 +349,21 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
                     half = size_budget // 2
                     result = result[:half] + "\n... [TRUNCATED] ...\n" + result[-half:]
                 if result and len(result) >= 10:
-                    improved[name] = result
+                    return name, result
             except Exception:
-                continue  # keep original section on failure
+                pass
+            return None  # keep original section on failure
+
+        import concurrent.futures
+
+        workers = min(max_workers, max(len(tasks), 1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_refine_one, t) for t in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                result = fut.result()
+                if result:
+                    name, content = result
+                    improved[name] = content
         return improved
 
 

@@ -374,6 +374,16 @@ class Optimizer:
             prev_scores = scores
             history.append(f"Round {round_num + 1}: score {scores.composite:.2f}")
 
+            # ── Incremental output: never lose progress to timeouts ──
+            # Write best-so-far artifact each round so an interrupted run
+            # still yields a usable refined file.
+            if self.output_path:
+                best_so_far = self.frontier.best.artifact if self.frontier.best else artifact
+                try:
+                    self.output_path.write_text(best_so_far)
+                except OSError:
+                    pass  # best-effort; final write happens at end
+
             # ── Check redundancy ──
             if check_redundancy(self._learning_log):
                 break
