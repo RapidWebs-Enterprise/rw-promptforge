@@ -82,6 +82,10 @@ class Optimizer:
         metric: MetricType | str = "llm",
         examples: list[FewShotExample] | None = None,
         frontier_size: int = 5,
+        # v2.2 tuning knobs
+        convergence_threshold: float = 0.8,
+        no_reverse_audit: bool = False,
+        max_growth: float = SIZE_MULTIPLIER_CAP,
     ) -> None:
         self.provider = provider
         self.reflector = reflector
@@ -99,6 +103,10 @@ class Optimizer:
         self.metric = MetricType(metric) if isinstance(metric, str) else metric
         self.examples = list(examples or [])
         self.frontier = Frontier(max_size=max(1, frontier_size))
+        # v2.2 tuning knobs
+        self.convergence_threshold = convergence_threshold
+        self.no_reverse_audit = no_reverse_audit
+        self.max_growth = max_growth
         self._learning_log: list[LearningLogEntry] = []
         self._score_history: list[CategoryScores] = []
         self._multiplier_history: list[MultiplierEntry] = []
@@ -183,7 +191,7 @@ class Optimizer:
             severity_before = self._max_severity(traces)
 
             truncated = truncate_artifact(artifact, MAX_ARTIFACT_CHARS)
-            size_budget = int(original_size * SIZE_MULTIPLIER_CAP)
+            size_budget = int(original_size * self.max_growth)
 
             variants: list[tuple[int, str]] = []
             for slot in range(self.beam_size):
@@ -225,14 +233,18 @@ class Optimizer:
                     for e in self._learning_log[-3:]
                     if e.observed_outcome in ("improvement", "neutral")
                 ]
-                audit = reverse_audit(
-                    artifact_path=artifact_path if target_type == "soul" else None,
-                    old_artifact=old_artifact,
-                    new_artifact=variant,
-                    failure_traces=failure_summary,
-                    original_size=original_size,
-                    recent_snippets=recent_snippets,
-                )
+                if self.no_reverse_audit:
+                    audit = PASS
+                else:
+                    audit = reverse_audit(
+                        artifact_path=artifact_path if target_type == "soul" else None,
+                        old_artifact=old_artifact,
+                        new_artifact=variant,
+                        failure_traces=failure_summary,
+                        original_size=original_size,
+                        recent_snippets=recent_snippets,
+                        size_cap=self.max_growth,
+                    )
 
                 if audit == FAIL:
                     self._learning_log.append(
@@ -329,7 +341,11 @@ class Optimizer:
 
             # ── Check convergence ──
             if len(self._learning_log) >= self.min_rounds:
-                if is_converged(self._learning_log, self._multiplier_history):
+                if is_converged(
+                    self._learning_log,
+                    self._multiplier_history,
+                    threshold=self.convergence_threshold,
+                ):
                     break
 
         # ── Save output (best of frontier when populated, else final artifact) ──
@@ -344,7 +360,11 @@ class Optimizer:
             artifact=final_artifact,
             rounds=len(self._learning_log),
             failures_found=total_failures,
-            converged=is_converged(self._learning_log, self._multiplier_history),
+            converged=is_converged(
+                self._learning_log,
+                self._multiplier_history,
+                threshold=self.convergence_threshold,
+            ),
             failure_summary="\n".join(history),
             learning_log=list(self._learning_log),
             composite_score=prev_scores.composite if prev_scores else 0.0,

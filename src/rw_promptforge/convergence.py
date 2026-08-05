@@ -70,11 +70,12 @@ def convergence_score(history: list[LearningLogEntry]) -> float:
 def is_converged(
     history: list[LearningLogEntry],
     multipliers: list[MultiplierEntry] | None = None,
+    threshold: float = 0.8,
 ) -> bool:
     """Decide whether the optimization loop should stop.
 
     Returns True when:
-    - Convergence score >= 0.8 (hard stop), OR
+    - Convergence score >= ``threshold`` (hard stop, default 0.8), OR
     - 2+ signals active in soft zone (score >= 0.6 + stagnant outcome)
     """
     if len(history) < 2:
@@ -83,7 +84,7 @@ def is_converged(
     score = convergence_score(history)
 
     # Hard stop
-    if score >= 0.8:
+    if score >= threshold:
         return True
 
     # Soft stop: 2+ signals active

@@ -124,6 +124,19 @@ class TestIsConverged:
         assert not is_converged([])
         assert not is_converged([LearningLogEntry("r1", "improvement")])
 
+    def test_threshold_configurable(self):
+        """Lower threshold = converges sooner (tuning knob)."""
+        # 2 improvements + 1 neutral: severity 0.4 + size 0.3 = 0.7,
+        # fix_rate 2/3 → no fix signal; soft stop needs 2+ non-improvements (only 1)
+        entries = [
+            LearningLogEntry("r1", "improvement", severity_after=1, artifact_snippet="a" * 50),
+            LearningLogEntry("r2", "improvement", severity_after=1, artifact_snippet="a" * 51),
+            LearningLogEntry("r3", "neutral", severity_after=1, artifact_snippet="a" * 52),
+        ]
+        assert is_converged(entries, threshold=0.7)
+        # Very strict threshold: not converged at 0.95
+        assert not is_converged(entries, threshold=0.95)
+
 
 class TestCheckRedundancy:
     def test_not_redundant_with_few_entries(self):

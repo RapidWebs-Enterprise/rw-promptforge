@@ -25,6 +25,7 @@ def reverse_audit(
     failure_traces: str = "",
     original_size: int = 0,
     recent_snippets: list[str] | None = None,
+    size_cap: float = SIZE_MULTIPLIER_CAP,
 ) -> str:
     """Run a reverse audit on a proposed optimizer change.
 
@@ -42,6 +43,8 @@ def reverse_audit(
         Original artifact size (for total cap check).
     recent_snippets : list[str] | None
         Artifact snippets from recent history for stagnation detection.
+    size_cap : float
+        Growth cap as a multiplier of the original size (default 1.5).
 
     Returns
     -------
@@ -61,7 +64,7 @@ def reverse_audit(
 
     # 2. SIZE CHECK — total cap from original
     if original_size > 0:
-        if len(new_artifact) > original_size * SIZE_MULTIPLIER_CAP:
+        if len(new_artifact) > original_size * size_cap:
             return FAIL  # hard reject — size cap exceeded
 
     # 3. SEMANTIC CHECK

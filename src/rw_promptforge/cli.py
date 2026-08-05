@@ -113,6 +113,24 @@ def main() -> None:
     help="Max candidates kept on the frontier (v2.1, default: 5).",
 )
 @click.option(
+    "--convergence-threshold",
+    default=0.8,
+    type=float,
+    help="Convergence score for hard stop (v2.2, default: 0.8).",
+)
+@click.option(
+    "--no-reverse-audit",
+    is_flag=True,
+    default=False,
+    help="Skip the reverse audit gates (v2.2, risky — for exploration).",
+)
+@click.option(
+    "--max-growth",
+    default=1.5,
+    type=float,
+    help="Growth cap as multiplier of original size (v2.2, default: 1.5).",
+)
+@click.option(
     "--output",
     default=None,
     type=str,
@@ -137,6 +155,9 @@ def optimize(
     metric: str,
     examples: str | None,
     frontier_size: int,
+    convergence_threshold: float,
+    no_reverse_audit: bool,
+    max_growth: float,
     output: str | None,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
@@ -187,10 +208,19 @@ def optimize(
         metric=metric,
         examples=example_list,
         frontier_size=frontier_size,
+        convergence_threshold=convergence_threshold,
+        no_reverse_audit=no_reverse_audit,
+        max_growth=max_growth,
     )
 
     if beam_size > 1:
         console.print(f"[dim]Beam: {beam_size} variants/round · Metric: {metric}[/dim]")
+    if convergence_threshold != 0.8:
+        console.print(f"[dim]Convergence threshold: {convergence_threshold}[/dim]")
+    if no_reverse_audit:
+        console.print("[dim]Reverse audit: [bold red]DISABLED[/bold red][/dim]")
+    if max_growth != 1.5:
+        console.print(f"[dim]Growth cap: {max_growth}×[/dim]")
 
     console.print("\n[bold]Optimizing...[/bold]")
 
