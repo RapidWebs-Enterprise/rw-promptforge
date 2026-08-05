@@ -27,7 +27,9 @@ MAX_ARTIFACT_CHARS = 60000
 """""Maximum artifact size before head+tail truncation."""
 
 SIZE_MULTIPLIER_CAP = 1.5
-"""Max allowable growth ratio relative to ORIGINAL artifact size (total, not per-round)."""
+"""Max allowable growth ratio relative to the PREVIOUS ROUND's artifact size
+(per-round cap, not cumulative from original). Each round may grow the
+artifact by at most 1.5× the accepted size of the previous round."""
 
 MAX_ROUNDS_CAP = 20
 """Hard ceiling on optimization iterations."""
@@ -225,8 +227,8 @@ class LearningLogEntry:
 
     attempted_change: str
     observed_outcome: str
-    severity_before: int = 0
-    severity_after: int = 0
+    severity_before: float = 0.0
+    severity_after: float = 0.0
     change_summary: str = ""
     # v2 extensions
     artifact_snippet: str = ""   # first 200 chars of artifact at this point

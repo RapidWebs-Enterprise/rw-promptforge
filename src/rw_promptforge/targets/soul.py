@@ -5,6 +5,48 @@ from __future__ import annotations
 from pathlib import Path
 
 
+# All wrapper tags that can carry a named section in SOUL.md artifacts.
+_SECTION_TAGS = (
+    "section",
+    "protocol",
+    "gate",
+    "verification",
+    "quality_standards",
+    "cognitive_framework",
+    "infrastructure",
+    "process_discipline",
+    "identity",
+    "style",
+    "memory_system",
+    "header",
+    "section_map",
+    "soul_file",
+)
+
+
+def _find_section_content(text: str, section_name: str) -> tuple[str, str] | None:
+    """Locate a named section and return (tag, content).
+
+    Searches for any opening tag of the form ``<tag name="section_name">``
+    and extracts content until the matching ``</tag>``. Returns None when the
+    section is absent.
+    """
+    for tag in _SECTION_TAGS:
+        pattern = f'<{tag} name="{section_name}"'
+        start = text.find(pattern)
+        if start == -1:
+            continue
+        content_start = text.find(">", start) + 1
+        if content_start == 0:
+            return None
+        close_tag = f"</{tag}>"
+        end = text.find(close_tag, content_start)
+        if end == -1:
+            return None
+        return tag, text[content_start:end]
+    return None
+
+
 class SoulTarget:
     """Represents a SOUL.md file as an optimization target.
 
@@ -53,21 +95,17 @@ class SoulTarget:
     def extract_armored_sections(self) -> dict[str, str]:
         """Extract ARMORED section contents as text.
 
-        Returns dict of section_name → section_content.
-        Returns empty dict if no section tags found.
+        Uses tag-aware matching (handles <protocol>, <gate>, <verification>,
+        etc. — not just <section>). Returns dict of section_name → section_content.
+        Returns empty dict if no armored sections found.
         """
         result: dict[str, str] = {}
         artifact = self.content
 
         for section_name in self.ARMORED_SECTIONS:
-            pattern = f'<section name="{section_name}">'
-            start = artifact.find(pattern)
-            if start == -1:
-                continue
-            end_tag = artifact.find("</section>", start)
-            if end_tag == -1:
-                continue
-            content_start = start + len(pattern)
-            result[section_name] = artifact[content_start:end_tag].strip()
+            found = _find_section_content(artifact, section_name)
+            if found is not None:
+                _tag, content = found
+                result[section_name] = content.strip()
 
         return result

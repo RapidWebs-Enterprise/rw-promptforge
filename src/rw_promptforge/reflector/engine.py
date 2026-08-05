@@ -355,11 +355,25 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
             return None  # keep original section on failure
 
         import concurrent.futures
+        import time
+
+        # Rate limiter: max 2 calls per second per worker to avoid 429 errors
+        _last_call: float = 0.0
+
+        def _rate_limited_refine(task: tuple[str, str, str]) -> tuple[str, str] | None:
+            nonlocal _last_call
+            # Stagger start by 50ms per worker to spread load at the provider
+            if _last_call > 0:
+                elapsed = time.time() - _last_call
+                if elapsed < 0.5:
+                    time.sleep(0.5 - elapsed)
+            _last_call = time.time()
+            return _refine_one(task)
 
         workers = min(max_workers, max(len(tasks), 1))
         done_count = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_refine_one, t) for t in tasks]
+            futures = [pool.submit(_rate_limited_refine, t) for t in tasks]
             for fut in concurrent.futures.as_completed(futures):
                 done_count += 1
                 if done_count % 4 == 0 or done_count == len(tasks):

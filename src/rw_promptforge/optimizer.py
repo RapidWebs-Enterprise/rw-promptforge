@@ -369,7 +369,8 @@ class Optimizer:
             self._score_history.append(scores)
             self._multiplier_history.append(multipliers)
 
-            severity_after = severity_before  # simplified
+            # Track actual severity as composite score delta (positive = improvement)
+            severity_after = max(0.0, prev_scores.composite - scores.composite) if prev_scores else 0.0
             outcome = "improvement" if severity_after < severity_before else "neutral"
 
             self._learning_log.append(

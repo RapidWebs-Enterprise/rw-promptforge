@@ -125,6 +125,10 @@ def _score_conciseness(artifact: str) -> float:
 
     Heuristic: penalize artifacts that are very long while measuring
     reasonable structural token efficiency.
+
+    Counts BOTH markdown headers (## ) and named XML-style section tags
+    (<tag name="...">) so this works correctly for both skill.md files
+    (markdown headers) and SOUL.md files (named sections with tags).
     """
     lines = artifact.splitlines()
     total_words = sum(len(l.split()) for l in lines if l.strip())
@@ -132,7 +136,11 @@ def _score_conciseness(artifact: str) -> float:
         return 0.0
 
     # Token efficiency: sections / thousand words
-    sections = len([l for l in lines if l.startswith("## ")])
+    # Count BOTH markdown headers AND named section tags
+    import re
+    md_sections = len([l for l in lines if l.startswith("## ")])
+    tag_sections = len(re.findall(r'<[a-z_]+ name="[a-z_]+"', artifact))
+    sections = md_sections + tag_sections
     if sections > 0:
         density = sections / (total_words / 1000.0)
     else:
