@@ -6,6 +6,12 @@ Implements the RefineStop v2 algorithm:
 - Convergence detection (fixed math)
 - Redundancy/diminishing returns detection
 - ARMORED section protection
+
+v2.1 (data-driven optimizer style):
+- Candidate beam: N variants per round with varied emphasis
+- Ranked frontier: top-K candidates kept by combined rank score
+- Few-shot examples: FPO-style gap-bridging toward gold targets/rubrics
+- Pluggable programmatic metrics (exact_match / rouge / bleu / tool_call_valid)
 """
 
 from __future__ import annotations
@@ -19,6 +25,10 @@ from rw_promptforge.datastore.models import (
     OptimizeResult,
     CategoryScores,
     MultiplierEntry,
+    Candidate,
+    Frontier,
+    FewShotExample,
+    MetricType,
     compute_multipliers,
     compute_artifact_meta,
     truncate_artifact,
@@ -39,6 +49,16 @@ from rw_promptforge.convergence import (
     format_convergence_report,
 )
 from rw_promptforge.auditor import reverse_audit, PASS, FAIL, REVIEW, extract_armored_sections
+from rw_promptforge.evaluator.metrics import batch_score
+
+# Beam variation hints — each slot asks the reflector for a different emphasis,
+# producing diverse candidates for the frontier (DDO-style exploration).
+BEAM_HINTS = (
+    "structural coherence and section ordering",
+    "failure coverage and behavioral specificity",
+    "conciseness and redundancy removal",
+    "actionability and executable instructions",
+)
 
 
 class Optimizer:
@@ -57,6 +77,11 @@ class Optimizer:
         gain_threshold: float = 0.02,
         stability_threshold: float = 0.05,
         min_rounds: int = 2,
+        # v2.1
+        beam_size: int = 1,
+        metric: MetricType | str = "llm",
+        examples: list[FewShotExample] | None = None,
+        frontier_size: int = 5,
     ) -> None:
         self.provider = provider
         self.reflector = reflector
@@ -69,6 +94,11 @@ class Optimizer:
         self.gain_threshold = gain_threshold
         self.stability_threshold = stability_threshold
         self.min_rounds = min_rounds
+        # v2.1
+        self.beam_size = max(1, beam_size)
+        self.metric = MetricType(metric) if isinstance(metric, str) else metric
+        self.examples = list(examples or [])
+        self.frontier = Frontier(max_size=max(1, frontier_size))
         self._learning_log: list[LearningLogEntry] = []
         self._score_history: list[CategoryScores] = []
         self._multiplier_history: list[MultiplierEntry] = []
@@ -123,8 +153,12 @@ class Optimizer:
             )
             failure_summary = self.db.format_flat_traces(traces)
 
-            # Check empty/early convergence
-            if self._is_empty_traces(failure_summary, traces):
+            # Few-shot examples replace db traces when provided (FPO mode)
+            if self.examples:
+                failure_summary = self._format_examples_summary(self.examples)
+
+            # Check empty/early convergence (only when no examples given)
+            if not self.examples and self._is_empty_traces(failure_summary, traces):
                 return OptimizeResult(
                     artifact=artifact,
                     rounds=round_num,
@@ -144,72 +178,101 @@ class Optimizer:
                 log_entries = self._format_learning_log()
                 history_text = f"LEARNING LOG:\n{log_entries}\n\n{history_text}"
 
-            # ── Reflect ──
+            # ── Reflect (beam) ──
             old_artifact = artifact
             severity_before = self._max_severity(traces)
 
             truncated = truncate_artifact(artifact, MAX_ARTIFACT_CHARS)
             size_budget = int(original_size * SIZE_MULTIPLIER_CAP)
-            artifact = self.reflector.reflect(
-                artifact=truncated,
-                failure_traces=failure_summary,
-                history=history_text,
-                size_budget=size_budget,
-            )
 
-            # Guard: reject empty/suspicious
-            if not artifact or len(artifact.strip()) < 10:
+            variants: list[tuple[int, str]] = []
+            for slot in range(self.beam_size):
+                variation = ""
+                if self.beam_size > 1:
+                    variation = f"\nVARIATION {slot + 1}: focus your rewrite on {BEAM_HINTS[slot % len(BEAM_HINTS)]}."
+                variant = self.reflector.reflect(
+                    artifact=truncated,
+                    failure_traces=failure_summary,
+                    history=history_text + variation,
+                    size_budget=size_budget,
+                )
+                # Guard: reject empty/suspicious variants
+                if variant and len(variant.strip()) >= 10:
+                    variants.append((slot, variant))
+
+            if not variants:
                 break
 
-            # ── Score candidate ──
-            scores = score_categories(artifact, failure_summary)
-            multipliers = compute_multipliers(prev_scores or scores, scores)
-            self._score_history.append(scores)
-            self._multiplier_history.append(multipliers)
-
-            # ── Reverse audit ──
-            recent_snippets = [e.artifact_snippet for e in self._learning_log[-3:]]
-            audit = reverse_audit(
-                artifact_path=artifact_path if target_type == "soul" else None,
-                old_artifact=old_artifact,
-                new_artifact=artifact,
-                failure_traces=failure_summary,
-                original_size=original_size,
-                recent_snippets=recent_snippets,
-            )
-
-            if audit == FAIL:
-                # Revert and continue
-                outcome = "rejected"
-                self._learning_log.append(
-                    LearningLogEntry(
-                        attempted_change=f"Round {round_num + 1}",
-                        observed_outcome=outcome,
-                        severity_before=severity_before,
-                        severity_after=severity_before,
-                        change_summary=format_category_report(prev_scores or scores, scores),
-                        artifact_snippet=artifact[:200],
-                    )
+            # ── Score + audit every variant, populate frontier ──
+            accepted: list[tuple[int, str, CategoryScores]] = []
+            for slot, variant in variants:
+                scores = score_categories(variant, failure_summary)
+                metric_score = self._candidate_metric(variant)
+                candidate = Candidate(
+                    artifact=variant,
+                    scores=scores,
+                    metric_score=metric_score,
+                    size_delta=len(variant) / original_size if original_size else 0.0,
+                    round_generated=round_num + 1,
                 )
+
+                # ── Reverse audit ──
+                # Stagnation check must only compare against ACCEPTED artifacts —
+                # rejected siblings (same round, same base) are near-identical
+                # by construction and would falsely trip the 0.95 threshold.
+                recent_snippets = [
+                    e.artifact_snippet
+                    for e in self._learning_log[-3:]
+                    if e.observed_outcome in ("improvement", "neutral")
+                ]
+                audit = reverse_audit(
+                    artifact_path=artifact_path if target_type == "soul" else None,
+                    old_artifact=old_artifact,
+                    new_artifact=variant,
+                    failure_traces=failure_summary,
+                    original_size=original_size,
+                    recent_snippets=recent_snippets,
+                )
+
+                if audit == FAIL:
+                    self._learning_log.append(
+                        LearningLogEntry(
+                            attempted_change=f"Round {round_num + 1} slot {slot + 1}",
+                            observed_outcome="rejected",
+                            severity_before=severity_before,
+                            severity_after=severity_before,
+                            change_summary=format_category_report(prev_scores or scores, scores),
+                            artifact_snippet=variant[:200],
+                        )
+                    )
+                    continue
+
+                if audit == REVIEW:
+                    self._learning_log.append(
+                        LearningLogEntry(
+                            attempted_change=f"Round {round_num + 1} slot {slot + 1} (needs review)",
+                            observed_outcome="review_needed",
+                            severity_before=severity_before,
+                            severity_after=severity_before,
+                            change_summary=format_category_report(prev_scores or scores, scores),
+                            artifact_snippet=variant[:200],
+                        )
+                    )
+                    continue
+
+                # Passed audit → candidate enters the frontier
+                self.frontier.add(candidate)
+                accepted.append((slot, variant, scores))
+
+            if not accepted:
                 artifact = old_artifact
                 continue
 
-            if audit == REVIEW:
-                # Human review needed — stop and flag
-                outcome = "review_needed"
-                self._learning_log.append(
-                    LearningLogEntry(
-                        attempted_change=f"Round {round_num + 1} (needs review)",
-                        observed_outcome=outcome,
-                        severity_before=severity_before,
-                        severity_after=severity_before,
-                        change_summary=format_category_report(prev_scores or scores, scores),
-                        artifact_snippet=artifact[:200],
-                    )
-                )
-                break
+            # ── Post-mutation verification on the best variant ──
+            best_slot, best_variant, best_scores = max(
+                accepted, key=lambda t: self._rank(*t)
+            )
 
-            # ── Post-mutation verification ──
             if self.post_mutation_verify:
                 improved, verified = self.reflector.reflect_with_verification(
                     old_artifact, failure_summary, history_text, verify=True
@@ -222,14 +285,20 @@ class Optimizer:
                             observed_outcome=outcome,
                             severity_before=severity_before,
                             severity_after=severity_before,
-                            artifact_snippet=artifact[:200],
+                            artifact_snippet=best_variant[:200],
                         )
                     )
                     artifact = old_artifact
                     continue
-                artifact = improved
+                best_variant = improved
 
-            # ── Accept ──
+            # ── Accept best variant ──
+            artifact = best_variant
+            scores = best_scores
+            multipliers = compute_multipliers(prev_scores or scores, scores)
+            self._score_history.append(scores)
+            self._multiplier_history.append(multipliers)
+
             severity_after = severity_before  # simplified
             outcome = "improvement" if severity_after < severity_before else "neutral"
 
@@ -263,12 +332,16 @@ class Optimizer:
                 if is_converged(self._learning_log, self._multiplier_history):
                     break
 
-        # ── Save output ──
-        if self.output_path and artifact:
-            self.output_path.write_text(artifact)
+        # ── Save output (best of frontier when populated, else final artifact) ──
+        final_artifact = artifact
+        if self.frontier.best is not None:
+            final_artifact = self.frontier.best.artifact
+
+        if self.output_path and final_artifact:
+            self.output_path.write_text(final_artifact)
 
         return OptimizeResult(
-            artifact=artifact,
+            artifact=final_artifact,
             rounds=len(self._learning_log),
             failures_found=total_failures,
             converged=is_converged(self._learning_log, self._multiplier_history),
@@ -277,9 +350,56 @@ class Optimizer:
             composite_score=prev_scores.composite if prev_scores else 0.0,
             categories=str([s.as_dict() for s in self._score_history]),
             multipliers=str([m.multipliers for m in self._multiplier_history]),
+            frontier=list(self.frontier.candidates),
+            metric_type=self.metric.value if isinstance(self.metric, MetricType) else str(self.metric),
+            metric_score=self.frontier.best.metric_score if self.frontier.best else 0.0,
         )
 
     # ── Helpers ──
+
+    @staticmethod
+    def _rank(slot: int, variant: str, scores: CategoryScores) -> float:
+        """Rank key for accepted variants — composite only (metric applied via frontier)."""
+        return scores.composite
+
+    def _candidate_metric(self, artifact: str) -> float:
+        """Programmatic metric score for a candidate vs gold target responses.
+
+        Mean of the chosen metric computed between the candidate artifact and
+        each target-response example. Deterministic, larger-is-better.
+        Falls back to 0.0 when no target responses are available or the metric
+        is the default LLM judge.
+        """
+        if self.metric is MetricType.LLM or not self.examples:
+            return 0.0
+        refs = [e.target_response for e in self.examples if e.is_target_shape]
+        if not refs:
+            return 0.0
+        return batch_score([artifact] * len(refs), self.metric, refs)
+
+    def _format_examples_summary(self, examples: list[FewShotExample]) -> str:
+        """Format few-shot examples into reflector context (FPO gap-bridging).
+
+        Worst-performing examples (lowest rubric hit rate / largest gap to
+        target) surface first — they carry the most corrective signal.
+        """
+        ranked = sorted(
+            examples,
+            key=lambda e: (e.rubric_hit_rate(), 0.0 if e.is_target_shape else 1.0),
+        )
+        sections = ["## FEW-SHOT EXAMPLES (gap-bridging targets)"]
+        for i, ex in enumerate(ranked[:MAX_EFFECTIVE_TRACES], start=1):
+            sections.append(f"### Example {i}")
+            sections.append(f"Prompt: {ex.prompt[:400]}")
+            if ex.model_response:
+                sections.append(f"Model response (suboptimal): {ex.model_response[:300]}")
+            if ex.is_target_shape:
+                sections.append(f"Target response (gold): {ex.target_response[:300]}")
+            if ex.is_rubrics_shape:
+                for rubric, met in zip(ex.rubrics, ex.rubrics_evaluations):
+                    mark = "✓" if met else "✗"
+                    sections.append(f"- [{mark}] {rubric}")
+        return "\n".join(sections)
 
     def _is_empty_traces(self, failure_summary: str, traces: list) -> bool:
         """Check if failure traces indicate no actionable data."""

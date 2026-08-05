@@ -86,6 +86,33 @@ def main() -> None:
     help="Minimum rounds before convergence can trigger (default: 2).",
 )
 @click.option(
+    "--beam-size",
+    default=1,
+    type=int,
+    help="Candidate beam per round (v2.1, default: 1).",
+)
+@click.option(
+    "--metric",
+    type=click.Choice(
+        ["llm", "exact_match", "rouge_l", "rouge_2", "bleu", "tool_call_valid"],
+        case_sensitive=False,
+    ),
+    default="llm",
+    help="Programmatic metric for frontier ranking (v2.1, default: llm).",
+)
+@click.option(
+    "--examples",
+    default=None,
+    type=str,
+    help="JSONL of few-shot examples (prompt/model_response/target_response or rubrics).",
+)
+@click.option(
+    "--frontier-size",
+    default=5,
+    type=int,
+    help="Max candidates kept on the frontier (v2.1, default: 5).",
+)
+@click.option(
     "--output",
     default=None,
     type=str,
@@ -106,12 +133,17 @@ def optimize(
     gain_threshold: float,
     stability_threshold: float,
     min_rounds: int,
+    beam_size: int,
+    metric: str,
+    examples: str | None,
+    frontier_size: int,
     output: str | None,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
     from rw_promptforge.optimizer import Optimizer
     from rw_promptforge.provider import Provider
     from rw_promptforge.reflector.engine import Reflector
+    from rw_promptforge.targets.examples import load_examples, summarize_examples
 
     console.print(f"[bold]rw-promptforge[/] v{__version__}")
     console.print(f"Target: [cyan]{target_type}[/] | Path: [cyan]{path}[/]")
@@ -133,6 +165,12 @@ def optimize(
 
     reflector = Reflector(provider_obj)
 
+    # v2.1: load few-shot examples when provided
+    example_list = None
+    if examples:
+        example_list = load_examples(examples)
+        console.print(f"[dim]Examples: {summarize_examples(example_list)}[/dim]")
+
     output_path = output or (path + ".optimized" if save else None)
     optimizer = Optimizer(
         provider=provider_obj,
@@ -145,7 +183,14 @@ def optimize(
         gain_threshold=gain_threshold,
         stability_threshold=stability_threshold,
         min_rounds=min_rounds,
+        beam_size=beam_size,
+        metric=metric,
+        examples=example_list,
+        frontier_size=frontier_size,
     )
+
+    if beam_size > 1:
+        console.print(f"[dim]Beam: {beam_size} variants/round · Metric: {metric}[/dim]")
 
     console.print("\n[bold]Optimizing...[/bold]")
 
@@ -168,6 +213,17 @@ def optimize(
     if result.categories:
         console.print(f"\n[bold]Category Scores:[/bold]")
         console.print(f"  Composite: {result.composite_score:.2f}")
+
+    if result.frontier:
+        console.print(f"\n[bold]Frontier ({len(result.frontier)} candidates):[/bold]")
+        for i, cand in enumerate(result.frontier, start=1):
+            console.print(
+                f"  #{i} · rank {cand.rank_score:.3f} · composite {cand.scores.composite:.2f}"
+                f" · metric {cand.metric_score:.3f} · Δsize {cand.size_delta:.2f}×"
+                f" · round {cand.round_generated}"
+            )
+        if result.metric_type != "llm":
+            console.print(f"  Metric: [cyan]{result.metric_type}[/] = {result.metric_score:.3f}")
 
     if result.learning_log:
         console.print("\n[bold]Learning Log:[/bold]")

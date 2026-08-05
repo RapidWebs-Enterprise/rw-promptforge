@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Literal
 
 
@@ -273,6 +274,10 @@ class OptimizeResult:
     composite_score: float = 0.0
     categories: str = ""  # JSON-serialized list of CategoryScores
     multipliers: str = ""  # JSON-serialized list of MultiplierEntry
+    # v2.1 extensions
+    frontier: list[Candidate] = field(default_factory=list)
+    metric_type: str = "llm"
+    metric_score: float = 0.0
 
 
 # ── Severity Labels ───────────────────────────────────────────────────
@@ -282,3 +287,99 @@ SEVERITY_LABELS: dict[int, str] = {
     1: "MEDIUM",
     2: "HIGH",
 }
+
+
+# ── v2.1 Frontier (data-driven optimizer style) ───────────────────────
+
+
+class MetricType(str, Enum):
+    """Pluggable programmatic evaluation metrics.
+
+    Mirrors the Gemini data-driven optimizer's selectable metric palette:
+    exact_match / rouge / bleu / tool_call_valid, plus the default LLM judge.
+    All metrics are larger-is-better.
+    """
+
+    LLM = "llm"
+    EXACT_MATCH = "exact_match"
+    ROUGE_L = "rouge_l"
+    ROUGE_2 = "rouge_2"
+    BLEU = "bleu"
+    TOOL_CALL_VALID = "tool_call_valid"
+
+
+@dataclass
+class Candidate:
+    """One generated artifact variant with its evaluation scores."""
+
+    artifact: str
+    scores: CategoryScores = field(default_factory=CategoryScores)
+    metric_score: float = 0.0  # programmatic metric vs gold target (0..1)
+    size_delta: float = 0.0  # growth ratio vs original size (1.0 = unchanged)
+    round_generated: int = 0
+
+    @property
+    def rank_score(self) -> float:
+        """Combined ranking score: category composite + metric score.
+
+        Weights favor the category composite (0.7) over the programmatic
+        metric (0.3) — category scores capture structure/coverage/conciseness,
+        while the metric captures task-specific behavioral fit.
+        """
+        return 0.7 * self.scores.composite + 0.3 * self.metric_score
+
+
+@dataclass
+class Frontier:
+    """Ranked candidate frontier (Pareto-style, kept top-N by rank_score)."""
+
+    candidates: list[Candidate] = field(default_factory=list)
+    max_size: int = 5
+
+    def add(self, candidate: Candidate) -> None:
+        """Insert a candidate, then keep only the top-N by rank_score."""
+        self.candidates.append(candidate)
+        self.candidates.sort(key=lambda c: c.rank_score, reverse=True)
+        self.candidates = self.candidates[: self.max_size]
+
+    @property
+    def best(self) -> Candidate | None:
+        """Highest-ranked candidate, or None when empty."""
+        return self.candidates[0] if self.candidates else None
+
+    @property
+    def spread(self) -> float:
+        """Score spread between best and worst kept candidate [0, 1]."""
+        if len(self.candidates) < 2:
+            return 0.0
+        return self.candidates[0].rank_score - self.candidates[-1].rank_score
+
+
+@dataclass
+class FewShotExample:
+    """A labeled example for few-shot optimization (FPO-style).
+
+    Two supported shapes, matching Gemini's few-shot optimizer:
+    - Target-response: ``prompt`` + ``model_response`` + ``target_response``
+    - Rubrics:         ``prompt`` + ``model_response`` + ``rubrics`` + ``rubrics_evaluations``
+    """
+
+    prompt: str
+    model_response: str = ""
+    target_response: str = ""
+    rubrics: list[str] = field(default_factory=list)
+    rubrics_evaluations: list[bool] = field(default_factory=list)
+
+    @property
+    def is_target_shape(self) -> bool:
+        return bool(self.target_response)
+
+    @property
+    def is_rubrics_shape(self) -> bool:
+        return bool(self.rubrics) and bool(self.rubrics_evaluations)
+
+    def rubric_hit_rate(self) -> float:
+        """Fraction of rubrics met (0..1), 0.0 when no rubrics present."""
+        if not self.rubrics_evaluations:
+            return 0.0
+        return sum(self.rubrics_evaluations) / len(self.rubrics_evaluations)
