@@ -48,7 +48,14 @@ from rw_promptforge.convergence import (
     check_semantic_stability,
     format_convergence_report,
 )
-from rw_promptforge.auditor import reverse_audit, PASS, FAIL, REVIEW, extract_armored_sections
+from rw_promptforge.auditor import (
+    reverse_audit,
+    PASS,
+    FAIL,
+    REVIEW,
+    extract_armored_sections,
+    merge_artifact_sections,
+)
 from rw_promptforge.evaluator.metrics import batch_score
 
 # Beam variation hints — each slot asks the reflector for a different emphasis,
@@ -204,6 +211,10 @@ class Optimizer:
                     history=history_text + variation,
                     size_budget=size_budget,
                 )
+                # Structural merge: LLMs delete sections; guarantee the
+                # original skeleton survives by construction (target_type soul)
+                if target_type == "soul" and artifact:
+                    variant = merge_artifact_sections(artifact, variant)
                 # Guard: reject empty/suspicious variants
                 if variant and len(variant.strip()) >= 10:
                     variants.append((slot, variant))

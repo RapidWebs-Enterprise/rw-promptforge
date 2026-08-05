@@ -191,6 +191,94 @@ def _check_all_sections_preserved(old: str, new: str) -> str:
     return PASS
 
 
+def _iter_sections(text: str) -> list[tuple[str, str, str]]:
+    """Return (tag, name, content) tuples for all named sections, in FILE ORDER.
+
+    Each element is (tag, name, content). Attributes on the opening tag
+    (e.g. ``priority="P1"``) are preserved via the original text when the
+    caller rebuilds from the original.
+    """
+    found: list[tuple[int, str, str, str]] = []  # (pos, tag, name, content)
+    for tag in _SECTION_TAGS:
+        for m in re.finditer(rf'<{tag} name="([a-z_]+)"', text):
+            name = m.group(1)
+            res = _find_section_content(text, name)
+            if res is None:
+                continue
+            found_tag, content = res
+            if found_tag == tag:
+                found.append((m.start(), tag, name, content))
+    # Order by file position — critical for cursor-based reassembly
+    found.sort(key=lambda t: t[0])
+    return [(tag, name, content) for _, tag, name, content in found]
+
+
+def merge_artifact_sections(original: str, variant: str) -> str:
+    """Rebuild an artifact guaranteeing the original skeleton survives.
+
+    The LLM reflector tends to DELETE sections when asked to improve an
+    artifact (deletion inflates conciseness scores). This merge takes the
+    variant's section content where a section exists, and falls back to the
+    original content for any section the variant dropped or renamed.
+
+    Strategy:
+    1. Parse the original into an ordered list of (tag, name, content).
+    2. For each original section, use the variant's content if present
+       (same tag + same name), else keep the original content.
+    3. Append any NEW sections the variant introduced.
+    4. Reassemble in original order with the variant's non-section prose
+       where possible — otherwise keep the original header/footer.
+
+    The result passes the completeness gate BY CONSTRUCTION.
+    """
+    orig_sections = _iter_sections(original)
+    if not orig_sections:
+        return variant  # nothing to protect
+
+    orig_keys = {(tag, name) for tag, name, _ in orig_sections}
+    orig_names = {name for _, name, _ in orig_sections}
+    # Index variant sections by name — a variant may rename the wrapper tag
+    # (e.g. <gate name="x"> → <section name="x">); we still treat it as the
+    # same section and preserve the ORIGINAL tag type in the output.
+    variant_by_name: dict[str, str] = {}
+    new_sections: list[tuple[str, str, str]] = []
+    for tag, name, content in _iter_sections(variant):
+        variant_by_name[name] = content
+        if name not in orig_names:
+            new_sections.append((tag, name, content))
+
+    # Assemble: original order, variant content when available
+    rebuilt = ""
+    cursor = 0
+    for tag, name, orig_content in orig_sections:
+        # Copy leading prose, preserving the ORIGINAL opening tag verbatim
+        # (including attributes like priority="P1")
+        pattern = f'<{tag} name="{name}"'
+        pos = original.find(pattern, cursor)
+        if pos != -1:
+            rebuilt += original[cursor:pos]
+            open_end = original.find(">", pos) + 1
+            open_tag = original[pos:open_end]
+            cursor = original.find(f"</{tag}>", open_end) + len(f"</{tag}>")
+        else:
+            open_tag = f'<{tag} name="{name}">'
+            cursor = pos if pos != -1 else cursor
+
+        # Variant content wins; original tag type + attributes are preserved
+        content = variant_by_name.get(name, orig_content)
+        rebuilt += f'{open_tag}{content}</{tag}>'
+
+    # Append NEW sections the variant introduced (kept in variant order)
+    for tag, name, content in new_sections:
+        rebuilt += f'<{tag} name="{name}">{content}</{tag}>'
+
+    # Tail prose after the last section in the original
+    if cursor < len(original):
+        rebuilt += original[cursor:]
+
+    return rebuilt
+
+
 def _check_yaml_frontmatter(text: str) -> str:
     """Verify skill YAML frontmatter schema is preserved.
 

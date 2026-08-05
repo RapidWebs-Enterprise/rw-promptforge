@@ -12,6 +12,7 @@ from rw_promptforge.auditor import (
     _check_yaml_frontmatter,
     _check_armored_sections,
     _check_all_sections_preserved,
+    merge_artifact_sections,
 )
 
 
@@ -155,6 +156,64 @@ class TestAllSectionsPreserved:
             orig = (base / "ORIGINAL.md").read_text()
             refined = (base / "REFINED.md").read_text()
             assert _check_all_sections_preserved(orig, refined) == FAIL
+
+
+class TestMergeArtifactSections:
+    def test_merge_restores_deleted_sections(self):
+        """Variant deleted a section → merge restores original content."""
+        original = (
+            '<protocol name="a">ORIG A</protocol>'
+            '<verification name="b">ORIG B</verification>'
+        )
+        variant = '<protocol name="a">EDIT A</protocol>'
+        merged = merge_artifact_sections(original, variant)
+        # Edited section uses variant content
+        assert "EDIT A" in merged
+        # Deleted section restored with original content
+        assert 'name="b">ORIG B</verification>' in merged
+        # Completeness gate now passes
+        assert _check_all_sections_preserved(original, merged) == PASS
+
+    def test_merge_keeps_edited_content(self):
+        original = '<protocol name="a">ORIG</protocol>'
+        variant = '<protocol name="a">NEW CONTENT</protocol>'
+        merged = merge_artifact_sections(original, variant)
+        assert "NEW CONTENT" in merged
+        assert "ORIG" not in merged
+
+    def test_merge_adds_new_sections(self):
+        """Variant-added sections are preserved."""
+        original = '<protocol name="a">X</protocol>'
+        variant = '<protocol name="a">Y</protocol><protocol name="z">NEW</protocol>'
+        merged = merge_artifact_sections(original, variant)
+        assert 'name="z">NEW</protocol>' in merged
+        assert _check_all_sections_preserved(original, merged) == PASS
+
+    def test_merge_no_sections_returns_variant(self):
+        assert merge_artifact_sections("no sections", "anything") == "anything"
+
+    def test_merge_preserves_prose_between_sections(self):
+        """Non-section prose outside sections survives."""
+        original = 'HEADER\n<protocol name="a">X</protocol>\nFOOTER'
+        variant = '<protocol name="a">Y</protocol>'
+        merged = merge_artifact_sections(original, variant)
+        assert merged.startswith("HEADER")
+        assert merged.endswith("FOOTER")
+        assert "Y" in merged
+
+    def test_merge_real_soul_keeps_skeleton(self):
+        """Merging a section-deleting variant of the real soul keeps ALL sections."""
+        base = Path(__file__).parent.parent / "runs" / "soul-refine"
+        orig_path = base / "ORIGINAL.md"
+        refined_path = base / "REFINED.md"
+        if orig_path.exists() and refined_path.exists():
+            orig = orig_path.read_text()
+            refined = refined_path.read_text()
+            merged = merge_artifact_sections(orig, refined)
+            # All original sections survive in the merged artifact
+            assert _check_all_sections_preserved(orig, merged) == PASS
+            # And it's not identical to the original (edits flowed through)
+            assert merged != orig
 
 
 class TestYamlFrontmatter:
