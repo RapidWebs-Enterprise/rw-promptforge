@@ -136,6 +136,25 @@ def _find_section_content(text: str, section_name: str) -> tuple[str, str] | Non
     return None
 
 
+def _replace_section_content(text: str, section_name: str, new_content: str) -> str:
+    """Replace the content of a named section in-place, preserving the opening
+    tag (with attributes) and closing tag. No-op if the section is absent."""
+    found = _find_section_content(text, section_name)
+    if found is None:
+        return text
+    tag, _old_content = found
+    pattern = f'<{tag} name="{section_name}"'
+    start = text.find(pattern)
+    if start == -1:
+        return text
+    content_start = text.find(">", start) + 1
+    close_tag = f"</{tag}>"
+    end = text.find(close_tag, content_start)
+    if end == -1:
+        return text
+    return text[:content_start] + new_content + text[end:]
+
+
 def _check_armored_sections(old: str, new: str) -> str:
     """Verify ARMORED sections are preserved identically.
 

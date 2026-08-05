@@ -15,6 +15,8 @@ Improvements over v1:
 
 from __future__ import annotations
 
+import re
+
 from rw_promptforge.datastore.models import LearningLogEntry
 from rw_promptforge.provider import Provider
 
@@ -217,3 +219,127 @@ Use this diagnosis to make targeted fixes. Don't rewrite what's working."""
             severity_after=severity_after,
             change_summary=f"Modified artifact from {old_lines} to {new_lines} lines",
         )
+
+    # ── LLM Judge ──────────────────────────────────────────────────────
+
+    JUDGE_SYSTEM_PROMPT = """You are a strict evaluator of LLM agent instructions (SOUL files, skills, protocols).
+You are given:
+1. A BASELINE artifact (the current version)
+2. A PROPOSED REVISION (candidate improvement)
+3. REAL FAILURES the revision is meant to fix
+
+Rate the REVISION from 0.0 to 1.0 on how well it fixes the listed failures
+while preserving what already works:
+
+- 1.0: fully addresses the failures with clear, actionable, non-redundant fixes; no regressions
+- 0.75: mostly addresses the failures, minor gaps or wordiness
+- 0.5: partial fix — addresses some failures, misses others
+- 0.25: barely any meaningful change / fix is superficial
+- 0.0: no improvement, makes things worse, or drops/breaks existing structure
+
+Be strict: cosmetic rewording without addressing the failures scores low.
+Return ONLY the numeric score — nothing else, no explanation."""
+
+    def judge(self, baseline: str, candidate: str, failure_traces: str) -> float:
+        """LLM-as-judge: score candidate (0..1) vs baseline for the failures.
+
+        Deterministic-ish: temperature 0.3, single call. Returns 0.0 when the
+        judge cannot score (empty traces, parse failure) — safe default.
+        """
+        if not failure_traces or len(failure_traces.strip()) < 20:
+            return 0.0
+        # Baseline/candidate are truncated for token economy
+        prompt = f"""BASELINE ARTIFACT:
+```
+{baseline[:8000]}
+```
+
+PROPOSED REVISION:
+```
+{candidate[:8000]}
+```
+
+REAL FAILURES TO FIX:
+{failure_traces[:4000]}
+
+Score the REVISION 0.0-1.0 (see rules). Return ONLY the number."""
+        try:
+            raw = self.provider.reflect(prompt=prompt, system=self.JUDGE_SYSTEM_PROMPT).strip()
+            m = re.search(r"(-?\d+(?:\.\d+)?)", raw)
+            if not m:
+                return 0.0
+            return max(0.0, min(1.0, float(m.group(1))))
+        except Exception:
+            return 0.0
+
+    # ── Chunked section-level reflection ───────────────────────────────
+
+    SECTION_REFINE_SYSTEM_PROMPT = """You are an expert editor of LLM agent instruction files.
+You are given ONE SECTION of a larger SOUL.md / skill file, plus REAL failure
+traces from actual agent usage. Rewrite ONLY this section so that the failures
+are prevented, while preserving:
+
+1. The exact same tag and name (e.g. <protocol name="x"> stays <protocol name="x">).
+2. The section's role and structure — you are tightening content, not restructuring.
+3. Any YAML frontmatter, priorities, or attributes on the opening tag.
+
+Rules:
+- Be SPECIFIC: where a failure trace shows the agent doing X wrongly, make the
+  instruction say exactly what to do instead, with a concrete example.
+- Tighten: cut redundancy, keep it dense and actionable.
+- Do NOT add other sections, headers, or commentary.
+- Return ONLY the section content (the text between <tag name="x"> and </tag>),
+  with no code fences and no explanation."""
+
+    SECTION_REFINE_USER_TEMPLATE = """SECTION TO IMPROVE (tag: {tag}, name: {name}):
+```
+{section}
+```
+
+REAL FAILURE TRACES:
+{failure_traces}
+
+PREVIOUS IMPROVEMENTS (Learning Log):
+{history}
+
+Return ONLY the improved section content — the text that goes inside <{tag} name="{name}">...</{tag}>."""
+
+    def reflect_sections(
+        self,
+        sections: list[tuple[str, str, str]],
+        failure_traces: str,
+        history: str = "(no prior improvements)",
+        size_budget: int = 0,
+    ) -> dict[str, str]:
+        """Refine each section independently, return {section_name: new_content}.
+
+        Chunked reflection: a full 50KB artifact cannot be meaningfully
+        rewritten in one 8K-token call (models echo the input verbatim).
+        Refining each section separately makes every call small enough for
+        a real rewrite. Sections are keyed by name.
+        """
+        improved: dict[str, str] = {}
+        for tag, name, content in sections:
+            if not content.strip():
+                continue
+            user_prompt = self.SECTION_REFINE_USER_TEMPLATE.format(
+                tag=tag,
+                name=name,
+                section=content[:6000],
+                failure_traces=failure_traces[:3000],
+                history=history[:1500],
+            )
+            try:
+                result = self.provider.reflect(
+                    prompt=user_prompt,
+                    system=self.SECTION_REFINE_SYSTEM_PROMPT,
+                ).strip()
+                # Enforce per-section size budget (relative to original section)
+                if size_budget > 0 and len(result) > size_budget:
+                    half = size_budget // 2
+                    result = result[:half] + "\n... [TRUNCATED] ...\n" + result[-half:]
+                if result and len(result) >= 10:
+                    improved[name] = result
+            except Exception:
+                continue  # keep original section on failure
+        return improved

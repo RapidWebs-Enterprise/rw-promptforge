@@ -13,6 +13,7 @@ from rw_promptforge.auditor import (
     _check_armored_sections,
     _check_all_sections_preserved,
     merge_artifact_sections,
+    _iter_sections,
 )
 
 
@@ -150,12 +151,16 @@ class TestAllSectionsPreserved:
             assert _check_all_sections_preserved(text, text) == PASS
 
     def test_real_refined_fails(self, tmp_path):
-        """REFINED.md deleted 16 sections → completeness gate fails."""
-        base = Path(__file__).parent.parent / "runs" / "soul-refine"
-        if (base / "REFINED.md").exists():
-            orig = (base / "ORIGINAL.md").read_text()
-            refined = (base / "REFINED.md").read_text()
-            assert _check_all_sections_preserved(orig, refined) == FAIL
+        """REFINED.md deleted 16 sections → completeness gate fails.
+
+        Uses the stable fixture (a section-deleting variant captured from a
+        real run) rather than the live runs/ directory, which the optimizer
+        overwrites on every run.
+        """
+        base = Path(__file__).parent.parent / "tests" / "fixtures"
+        orig = (base / "original-soul.md").read_text()
+        refined = (base / "refined-deleted-sections.md").read_text()
+        assert _check_all_sections_preserved(orig, refined) == FAIL
 
 
 class TestMergeArtifactSections:
@@ -203,17 +208,20 @@ class TestMergeArtifactSections:
 
     def test_merge_real_soul_keeps_skeleton(self):
         """Merging a section-deleting variant of the real soul keeps ALL sections."""
-        base = Path(__file__).parent.parent / "runs" / "soul-refine"
-        orig_path = base / "ORIGINAL.md"
-        refined_path = base / "REFINED.md"
-        if orig_path.exists() and refined_path.exists():
-            orig = orig_path.read_text()
-            refined = refined_path.read_text()
-            merged = merge_artifact_sections(orig, refined)
-            # All original sections survive in the merged artifact
-            assert _check_all_sections_preserved(orig, merged) == PASS
-            # And it's not identical to the original (edits flowed through)
-            assert merged != orig
+        base = Path(__file__).parent.parent / "tests" / "fixtures"
+        orig = (base / "original-soul.md").read_text()
+        refined = (base / "refined-deleted-sections.md").read_text()
+        merged = merge_artifact_sections(orig, refined)
+        # All original sections survive in the merged artifact
+        assert _check_all_sections_preserved(orig, merged) == PASS
+        # And it's not identical to the original (edits flowed through)
+        assert merged != orig
+        # No duplicated sections in the merged artifact
+        from collections import Counter
+
+        names = [n for _, n, _ in _iter_sections(merged)]
+        dupes = {n: c for n, c in Counter(names).items() if c > 1}
+        assert not dupes
 
 
 class TestYamlFrontmatter:

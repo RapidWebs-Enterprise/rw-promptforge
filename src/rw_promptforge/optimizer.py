@@ -117,6 +117,8 @@ class Optimizer:
         self._learning_log: list[LearningLogEntry] = []
         self._score_history: list[CategoryScores] = []
         self._multiplier_history: list[MultiplierEntry] = []
+        # LLM judge context (baseline artifact, failure traces) — set per round
+        self._judge_context: tuple[str, str] | None = None
 
     def optimize_skill(
         self, artifact_path: str, skill_name: str
@@ -201,16 +203,45 @@ class Optimizer:
             size_budget = int(original_size * self.max_growth)
 
             variants: list[tuple[int, str]] = []
+            # Chunked reflection: a large soul artifact (>25KB) cannot be
+            # meaningfully rewritten in one call — the model echoes input.
+            # Refine per-section instead, then merge back into the skeleton.
+            chunk_sections: list[tuple[str, str, str]] = []
+            if target_type == "soul" and len(artifact) > 25000:
+                try:
+                    from rw_promptforge.auditor import _iter_sections
+
+                    chunk_sections = _iter_sections(artifact)
+                except Exception:
+                    chunk_sections = []
+
             for slot in range(self.beam_size):
                 variation = ""
                 if self.beam_size > 1:
                     variation = f"\nVARIATION {slot + 1}: focus your rewrite on {BEAM_HINTS[slot % len(BEAM_HINTS)]}."
-                variant = self.reflector.reflect(
-                    artifact=truncated,
-                    failure_traces=failure_summary,
-                    history=history_text + variation,
-                    size_budget=size_budget,
-                )
+
+                if chunk_sections:
+                    # Per-section refinement: one LLM call per section
+                    per_section_budget = max(2000, int(original_size * self.max_growth) // max(len(chunk_sections), 1))
+                    improved = self.reflector.reflect_sections(
+                        sections=chunk_sections,
+                        failure_traces=failure_summary,
+                        history=history_text + variation,
+                        size_budget=per_section_budget,
+                    )
+                    if not improved:
+                        continue
+                    # Reassemble: original skeleton, refined section content
+                    variant = merge_artifact_sections(artifact, artifact)
+                    for name, content in improved.items():
+                        variant = _replace_section_content(variant, name, content)
+                else:
+                    variant = self.reflector.reflect(
+                        artifact=truncated,
+                        failure_traces=failure_summary,
+                        history=history_text + variation,
+                        size_budget=size_budget,
+                    )
                 # Structural merge: LLMs delete sections; guarantee the
                 # original skeleton survives by construction (target_type soul)
                 if target_type == "soul" and artifact:
@@ -223,6 +254,8 @@ class Optimizer:
                 break
 
             # ── Score + audit every variant, populate frontier ──
+            # Judge context: current artifact + failure traces (LLM metric)
+            self._judge_context = (artifact[:8000], failure_summary[:4000])
             accepted: list[tuple[int, str, CategoryScores]] = []
             for slot, variant in variants:
                 scores = score_categories(variant, failure_summary)
@@ -394,14 +427,21 @@ class Optimizer:
         return scores.composite
 
     def _candidate_metric(self, artifact: str) -> float:
-        """Programmatic metric score for a candidate vs gold target responses.
+        """Metric score for a candidate vs gold target responses.
 
-        Mean of the chosen metric computed between the candidate artifact and
-        each target-response example. Deterministic, larger-is-better.
-        Falls back to 0.0 when no target responses are available or the metric
-        is the default LLM judge.
+        - LLM metric: reflector.judge() scores the candidate against the
+          current artifact + failure traces (0..1). Falls back to 0.0 when
+          no judge context is available (safe default).
+        - Programmatic metrics: mean of the chosen metric computed between
+          the candidate artifact and each target-response example.
         """
-        if self.metric is MetricType.LLM or not self.examples:
+        if self.metric is MetricType.LLM:
+            ctx = self._judge_context
+            if ctx is None:
+                return 0.0
+            baseline, failure_traces = ctx
+            return self.reflector.judge(baseline, artifact, failure_traces)
+        if not self.examples:
             return 0.0
         refs = [e.target_response for e in self.examples if e.is_target_shape]
         if not refs:
