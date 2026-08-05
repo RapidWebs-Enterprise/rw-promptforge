@@ -14,6 +14,8 @@ from rw_promptforge.auditor import (
     _check_all_sections_preserved,
     merge_artifact_sections,
     _iter_sections,
+    _stagnation_probe,
+    _stagnation_changed_chars,
 )
 
 
@@ -234,6 +236,58 @@ class TestYamlFrontmatter:
 
     def test_empty(self):
         assert _check_yaml_frontmatter("") == PASS
+
+
+class TestStagnationProbe:
+    def test_short_text_unchanged(self):
+        assert _stagnation_probe("short") == "short"
+
+    def test_samples_middle_for_long_text(self):
+        text = "HEADER" * 500 + '<protocol name="a">MIDDLE-CONTENT</protocol>' + "B" * 2000
+        probe = _stagnation_probe(text)
+        assert "MIDDLE-CONTENT" in probe
+        assert "HEADER" not in probe
+
+    def test_changed_chars_counts_actual_difference(self):
+        old = "SAME PREFIX " + "OLD CONTENT" + " SAME SUFFIX"
+        new = "SAME PREFIX " + "NEW CONTENT" + " SAME SUFFIX"
+        # OLD CONTENT (11) → NEW CONTENT (11) = replace, plus maybe spacing
+        changed = _stagnation_changed_chars(old, new)
+        # The exact count depends on SequenceMatcher's alignment; we just verify
+        # it detects the difference (non-zero) and is reasonable
+        assert 0 < changed <= 30
+
+    def test_identical_bodies_zero_changed(self):
+        body = "SAME " * 1000
+        assert _stagnation_changed_chars(body, body) == 0
+
+    def test_real_soul_variant_not_stagnant(self):
+        """A real soul variant with a meaningful rewrite must pass the
+        stagnation gate even though its header is byte-identical.
+
+        A tiny one-word change (42 chars) IS correctly flagged as stagnant.
+        A meaningful rewrite (254+ chars) correctly passes.
+        """
+        base = Path(__file__).parent.parent / "tests" / "fixtures"
+        orig = (base / "original-soul.md").read_text()
+        # Tiny edit = stagnant (correct behavior)
+        variant_tiny = orig.replace(
+            "## ⛔ SKILL GATE — Mandatory Pre-Flight",
+            "## ⛔ SKILL GATE — MANDATORY Pre-Flight (never skip)",
+        )
+        probe_o = _stagnation_probe(orig)
+        probe_v_tiny = _stagnation_probe(variant_tiny)
+        changed_tiny = _stagnation_changed_chars(probe_o, probe_v_tiny)
+        assert changed_tiny < 100  # correctly detected as stagnant
+
+        # Substantial edit = not stagnant
+        variant_real = orig.replace(
+            "## ⛔ SKILL GATE — Mandatory Pre-Flight",
+            "## ⛔ SKILL GATE — MANDATORY Pre-Flight (never skip)\n\n**New mandatory step:** Before any task, run the skill gate check explicitly and document the outcome.",
+        )
+        probe_v_real = _stagnation_probe(variant_real)
+        changed_real = _stagnation_changed_chars(probe_o, probe_v_real)
+        assert changed_real >= 100  # meaningful change passes
 
 
 class TestExtractArmored:

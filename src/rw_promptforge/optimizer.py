@@ -56,6 +56,7 @@ from rw_promptforge.auditor import (
     extract_armored_sections,
     merge_artifact_sections,
     _replace_section_content,
+    _stagnation_probe,
 )
 from rw_promptforge.evaluator.metrics import batch_score
 
@@ -153,6 +154,7 @@ class Optimizer:
         """Core v2 RefineStop loop."""
         artifact = Path(artifact_path).read_text()
         original_size = len(artifact)
+        round_base_size = len(artifact)  # Track current round's base size for audit
 
         meta = compute_artifact_meta(
             target_name, target_type, artifact,
@@ -209,12 +211,19 @@ class Optimizer:
             # Chunked reflection: a large soul artifact (>25KB) cannot be
             # meaningfully rewritten in one call — the model echoes input.
             # Refine per-section instead, then merge back into the skeleton.
+            # ARMORED sections are EXCLUDED: they are safety-critical and the
+            # reverse audit rejects any variant that touches them.
             chunk_sections: list[tuple[str, str, str]] = []
             if target_type == "soul" and len(artifact) > 25000:
                 try:
                     from rw_promptforge.auditor import _iter_sections
+                    from rw_promptforge.targets.soul import SoulTarget
 
-                    chunk_sections = _iter_sections(artifact)
+                    chunk_sections = [
+                        (tag, name, content)
+                        for tag, name, content in _iter_sections(artifact)
+                        if name not in SoulTarget.ARMORED_SECTIONS
+                    ]
                 except Exception:
                     chunk_sections = []
 
@@ -285,14 +294,14 @@ class Optimizer:
                     audit = PASS
                 else:
                     audit = reverse_audit(
-                        artifact_path=artifact_path if target_type == "soul" else None,
-                        old_artifact=old_artifact,
-                        new_artifact=variant,
-                        failure_traces=failure_summary,
-                        original_size=original_size,
-                        recent_snippets=recent_snippets,
-                        size_cap=self.max_growth,
-                    )
+                                        artifact_path=artifact_path if target_type == "soul" else None,
+                                        old_artifact=old_artifact,
+                                        new_artifact=variant,
+                                        failure_traces=failure_summary,
+                                        original_size=round_base_size,
+                                        recent_snippets=recent_snippets,
+                                        size_cap=self.max_growth,
+                                    )
 
                 if audit == FAIL:
                     self._learning_log.append(
@@ -302,7 +311,7 @@ class Optimizer:
                             severity_before=severity_before,
                             severity_after=severity_before,
                             change_summary=format_category_report(prev_scores or scores, scores),
-                            artifact_snippet=variant[:200],
+                            artifact_snippet=_stagnation_probe(variant),
                         )
                     )
                     continue
@@ -315,7 +324,7 @@ class Optimizer:
                             severity_before=severity_before,
                             severity_after=severity_before,
                             change_summary=format_category_report(prev_scores or scores, scores),
-                            artifact_snippet=variant[:200],
+                            artifact_snippet=_stagnation_probe(variant),
                         )
                     )
                     continue
@@ -345,7 +354,7 @@ class Optimizer:
                             observed_outcome=outcome,
                             severity_before=severity_before,
                             severity_after=severity_before,
-                            artifact_snippet=best_variant[:200],
+                            artifact_snippet=_stagnation_probe(best_variant),
                         )
                     )
                     artifact = old_artifact
@@ -354,6 +363,7 @@ class Optimizer:
 
             # ── Accept best variant ──
             artifact = best_variant
+            round_base_size = len(best_variant)  # Update base for next round's audit
             scores = best_scores
             multipliers = compute_multipliers(prev_scores or scores, scores)
             self._score_history.append(scores)
@@ -369,7 +379,7 @@ class Optimizer:
                     severity_before=severity_before,
                     severity_after=severity_after,
                     change_summary=format_category_report(prev_scores or scores, scores),
-                    artifact_snippet=artifact[:200],
+                    artifact_snippet=_stagnation_probe(artifact),
                     categories=str(scores.as_dict()),
                     multiplier=str(multipliers.multipliers),
                 )

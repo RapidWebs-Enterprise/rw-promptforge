@@ -77,15 +77,27 @@ def reverse_audit(
         return REVIEW  # flag for human, don't auto-reject
 
     # 4. STAGNATION CHECK
+    # Compare content-bearing regions using CHANGE COUNT, not ratio.
+    # SequenceMatcher.ratio() stays near 1.0 for tiny edits in large bodies
+    # (e.g. 0.998 for a 53KB file with a one-word change). We count actual
+    # changed characters instead — true stagnation is < 100 chars changed.
+    # For short artifacts (< 500 chars), fall back to ratio < 0.95 to avoid
+    # penalizing legitimate rewrites that are short but substantially different.
     if recent_snippets:
+        new_probe = _stagnation_probe(new_artifact)
         for snippet in recent_snippets:
             if not snippet:
                 continue
-            sim = sequence_similarity(
-                new_artifact[:500], snippet[:500]
-            )
-            if sim > 0.95:
-                return FAIL  # stagnating
+            old_probe = _stagnation_probe(snippet)
+            # Short probes: use ratio (more sensitive to semantic difference)
+            if len(old_probe) < 500 or len(new_probe) < 500:
+                sim = sequence_similarity(new_probe, old_probe)
+                if sim > 0.95:
+                    return FAIL
+            else:
+                changed = _stagnation_changed_chars(old_probe, new_probe)
+                if changed < 100:
+                    return FAIL  # stagnating (insufficient actual change)
 
     return PASS
 
@@ -134,6 +146,37 @@ def _find_section_content(text: str, section_name: str) -> tuple[str, str] | Non
             return None
         return tag, text[content_start:end]
     return None
+
+
+def _stagnation_probe(text: str) -> str:
+    """Extract a content-bearing sample for stagnation comparison.
+
+    The file head (soul_file/header/section_map preamble) is stable across
+    rounds — comparing heads always yields ~1.0 similarity and falsely
+    trips stagnation. Strip everything before the first named section and
+    return the body (capped at 12K chars for speed).
+    """
+    # Cut at the first named section opener: <tag name="x"
+    match = re.search(r'<[a-z_]+ name="', text)
+    body = text[match.start() :] if match else text
+    return body[:12000]
+
+
+def _stagnation_changed_chars(old: str, new: str) -> int:
+    """Count characters that actually changed between two stagnation probes.
+
+    Unlike SequenceMatcher.ratio() which stays near 1.0 for tiny edits in
+    large bodies, this returns the absolute number of changed characters.
+    A true stagnation is < 100 chars of actual change.
+    """
+    from difflib import SequenceMatcher
+
+    matcher = SequenceMatcher(None, old, new)
+    changed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            changed += (i2 - i1) + (j2 - j1)
+    return changed
 
 
 def _replace_section_content(text: str, section_name: str, new_content: str) -> str:
