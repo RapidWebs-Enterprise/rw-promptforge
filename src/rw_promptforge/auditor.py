@@ -89,39 +89,74 @@ def reverse_audit(
 # ── Structural Checks ─────────────────────────────────────────────────
 
 
+# All wrapper tags that can carry a named section in SOUL.md artifacts.
+# Opening form: <tag name="section_name" ...> ... </tag>
+_SECTION_TAGS = (
+    "section",
+    "protocol",
+    "gate",
+    "verification",
+    "quality_standards",
+    "cognitive_framework",
+    "infrastructure",
+    "process_discipline",
+    "identity",
+    "style",
+    "memory_system",
+    "header",
+    "section_map",
+    "soul_file",
+)
+
+
+def _find_section_content(text: str, section_name: str) -> tuple[str, str] | None:
+    """Locate a named section and return (tag, content).
+
+    Searches for any opening tag of the form ``<tag name="section_name">``
+    and extracts content until the matching ``</tag>``. Returns None when the
+    section is absent.
+    """
+    for tag in _SECTION_TAGS:
+        pattern = f'<{tag} name="{section_name}"'
+        start = text.find(pattern)
+        if start == -1:
+            continue
+        content_start = text.find(">", start) + 1
+        if content_start == 0:
+            return None
+        close_tag = f"</{tag}>"
+        end = text.find(close_tag, content_start)
+        if end == -1:
+            return None
+        return tag, text[content_start:end]
+    return None
+
+
 def _check_armored_sections(old: str, new: str) -> str:
     """Verify ARMORED sections are preserved identically.
 
-    Uses SoulTarget.ARMORED_SECTIONS set to identify which section
-    names must not change.
+    Matches named sections regardless of wrapper tag type
+    (``<protocol name=``, ``<verification name=``, ``<section name=``, ...),
+    then compares the section content byte-for-byte.
     """
     from rw_promptforge.targets.soul import SoulTarget
 
     for section_name in SoulTarget.ARMORED_SECTIONS:
-        old_pattern = f'<section name="{section_name}">'
-        new_pattern = f'<section name="{section_name}">'
+        old_found = _find_section_content(old, section_name)
+        new_found = _find_section_content(new, section_name)
 
-        old_start = old.find(old_pattern)
-        new_start = new.find(new_pattern)
-
-        if old_start == -1 and new_start == -1:
+        if old_found is None and new_found is None:
             continue  # section not present in either — OK
-        if old_start == -1:
+        if old_found is None:
             continue  # was never there, shouldn't be now either
-        if new_start == -1:
+        if new_found is None:
             return FAIL  # ARMORED section removed!
 
-        # Find the section content between <section> and </section>
-        old_end_tag = f"</section>"
-        old_end = old.find(old_end_tag, old_start)
-        new_end = new.find(old_end_tag, new_start)
+        old_tag, old_content = old_found
+        new_tag, new_content = new_found
 
-        if old_end == -1 or new_end == -1:
-            return FAIL  # malformed section tags
-
-        # Extract content between tags (skip the opening tag line)
-        old_content = old[old_start + len(old_pattern):old_end]
-        new_content = new[new_start + len(new_pattern):new_end]
+        if old_tag != new_tag:
+            return FAIL  # wrapper tag changed — breaks soul parsing
 
         if old_content.strip() != new_content.strip():
             return FAIL  # ARMORED content changed!

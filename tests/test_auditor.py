@@ -81,6 +81,35 @@ class TestArmoredSections:
         result = _check_armored_sections(old, new)
         assert result == FAIL
 
+    def test_real_soul_tag_format_preserved(self):
+        """SOUL.md uses <protocol name=...> tags — must be matched too."""
+        old = '<protocol name="machine_protocol">CONTENT</protocol>'
+        new = '<protocol name="machine_protocol">CONTENT</protocol>\nrest of file'
+        result = _check_armored_sections(old, new)
+        assert result == PASS
+
+    def test_real_soul_tag_format_modified(self):
+        """ARMORED section in real SOUL.md tag format modified = fail."""
+        old = '<verification name="budget_guards">ORIGINAL TEXT</verification>'
+        new = '<verification name="budget_guards">CHANGED TEXT</verification>'
+        result = _check_armored_sections(old, new)
+        assert result == FAIL
+
+    def test_real_soul_tag_format_removed(self):
+        """ARMORED section in real SOUL.md tag format removed = fail."""
+        old = '<gate name="skill_gate">\n## ⛔ SKILL GATE\n</gate>'
+        new = '<gate name="skill_gate">\n## ⛔ SKILL GATE\n</gate>\n'  # still present
+        assert _check_armored_sections(old, new) == PASS
+        removed = 'no gate here anymore'
+        assert _check_armored_sections(old, removed) == FAIL
+
+    def test_cross_tag_format_still_protected(self):
+        """Same name, different wrapper tag — removed section still fails."""
+        old = '<verification name="reality_check">CONTENT</verification>'
+        new = '<section name="reality_check">CONTENT</section>'  # renamed tag
+        result = _check_armored_sections(old, new)
+        assert result == FAIL
+
     def test_no_sections_both_sides(self):
         """No ARMORED sections in either = pass."""
         result = _check_armored_sections("plain text", "plain text")
