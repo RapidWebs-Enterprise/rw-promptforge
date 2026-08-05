@@ -34,6 +34,17 @@ Key principles:
 6. Return ONLY the improved artifact. No explanation, no commentary, no code fences.
 7. If the artifact has YAML frontmatter, preserve and update it.
 8. Target SPECIFIC sections — don't rewrite everything.
+9. STRUCTURAL INTEGRITY (MANDATORY): NEVER delete, merge, rename, or drop
+   any section, block, or tag that exists in the CURRENT ARTIFACT. Every
+   <tag name="...">...</tag> region present in the input MUST appear in your
+   output with the same tag name and same section name. You may EDIT the
+   content inside sections, but the section skeleton itself is inviolable.
+   If the input has 23 sections, your output has 23 sections. Adding new
+   sections is allowed; removing or restructuring existing ones is not.
+10. SIZE DISCIPLINE: Do not balloon the artifact. Keep it within the size
+    budget. Prefer tightening existing wording over adding new prose.
+11. Do not convert section tags to other types (e.g. <protocol> must stay
+    <protocol>, <verification> must stay <verification>).
 """
 
 # User prompt has dynamic content at the END (cache-friendly)

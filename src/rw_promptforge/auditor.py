@@ -7,6 +7,8 @@ and stagnation checks (not cycling through near-identical outputs).
 
 from __future__ import annotations
 
+import re
+
 from rw_promptforge.datastore.models import (
     sequence_similarity,
     SIZE_MULTIPLIER_CAP,
@@ -57,6 +59,8 @@ def reverse_audit(
     # 1. STRUCTURAL CHECK
     if artifact_path and "soul" in artifact_path.lower():
         structural = _check_armored_sections(old_artifact, new_artifact)
+        if structural == PASS:
+            structural = _check_all_sections_preserved(old_artifact, new_artifact)
     else:
         structural = _check_yaml_frontmatter(new_artifact)
     if structural != PASS:
@@ -160,6 +164,29 @@ def _check_armored_sections(old: str, new: str) -> str:
 
         if old_content.strip() != new_content.strip():
             return FAIL  # ARMORED content changed!
+
+    return PASS
+
+
+def _check_all_sections_preserved(old: str, new: str) -> str:
+    """Verify ALL named sections in the original survive in the new artifact.
+
+    Complements the ARMORED check — even non-armored sections must not be
+    silently deleted (deletion inflates conciseness scores and loses critical
+    instructions). Returns FAIL on the first missing section.
+    """
+    old_names = set()
+    for tag in _SECTION_TAGS:
+        for m in re.finditer(rf'<{tag} name="([a-z_]+)"', old):
+            old_names.add((tag, m.group(1)))
+
+    for tag, name in old_names:
+        found = _find_section_content(new, name)
+        if found is None:
+            return FAIL  # section {name} deleted
+        new_tag, _ = found
+        if new_tag != tag:
+            return FAIL  # section {name} changed wrapper tag
 
     return PASS
 

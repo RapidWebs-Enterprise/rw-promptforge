@@ -1,6 +1,7 @@
 """Tests for the reverse auditor module."""
 
 import pytest
+from pathlib import Path
 
 from rw_promptforge.auditor import (
     reverse_audit,
@@ -10,6 +11,7 @@ from rw_promptforge.auditor import (
     extract_armored_sections,
     _check_yaml_frontmatter,
     _check_armored_sections,
+    _check_all_sections_preserved,
 )
 
 
@@ -121,6 +123,38 @@ class TestArmoredSections:
         new = 'no sections here'
         result = _check_armored_sections(old, new)
         assert result == FAIL
+
+
+class TestAllSectionsPreserved:
+    def test_all_preserved_passes(self):
+        old = '<protocol name="a">X</protocol><protocol name="b">Y</protocol>'
+        new = '<protocol name="a">X EDIT</protocol><protocol name="b">Y</protocol><protocol name="c">NEW</protocol>'
+        assert _check_all_sections_preserved(old, new) == PASS
+
+    def test_deleted_section_fails(self):
+        old = '<protocol name="a">X</protocol><verification name="b">Y</verification>'
+        new = '<protocol name="a">X</protocol>'
+        assert _check_all_sections_preserved(old, new) == FAIL
+
+    def test_tag_type_change_fails(self):
+        old = '<protocol name="a">X</protocol>'
+        new = '<section name="a">X</section>'
+        assert _check_all_sections_preserved(old, new) == FAIL
+
+    def test_real_soul_pass(self, tmp_path):
+        """Real ORIGINAL vs itself = pass."""
+        orig = Path.home() / ".hermes" / "SOUL.md"
+        if orig.exists():
+            text = orig.read_text()
+            assert _check_all_sections_preserved(text, text) == PASS
+
+    def test_real_refined_fails(self, tmp_path):
+        """REFINED.md deleted 16 sections → completeness gate fails."""
+        base = Path(__file__).parent.parent / "runs" / "soul-refine"
+        if (base / "REFINED.md").exists():
+            orig = (base / "ORIGINAL.md").read_text()
+            refined = (base / "REFINED.md").read_text()
+            assert _check_all_sections_preserved(orig, refined) == FAIL
 
 
 class TestYamlFrontmatter:
