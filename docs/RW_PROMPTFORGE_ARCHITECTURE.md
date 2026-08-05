@@ -11,7 +11,19 @@
 
 RW-PromptForge is an **iterative prompt refinement engine** — it takes an agent instruction file (SOUL.md or skill.md), learns from real-world failure traces recorded during agent operation, and produces a converged version that prevents those failures from recurring. The engine implements the **RefineStop v2.2 algorithm**: multi-signal scoring, beam search, forward/reverse audit gates, convergence detection, and section-level chunked refinement for large artifacts.
 
-The engine was tested on a 51,860-character SOUL.md file over 5 iterations, producing a 312,693-character refined version (503% growth). It converged at a composite score of 0.85/1.0.
+The engine was tested on a 51,860-character SOUL.md file over 5 iterations using simulated examples, producing a 312,693-character refined version (503% growth) that converged at 0.85/1.0. 
+
+**Real failure traces** from `~/.hermes/state.db` (58K messages, 297 sessions) produced a dramatically more restrained result: **86,558 chars, +67% growth, composite 0.78, 2 rounds**. The engine did not converge — meaning real trace patterns are more nuanced than simulated ones, and the severity-trend fix (§6.1) correctly prevented premature convergence.
+
+A **merged SOUL.md** was produced cherry-picking the 5 best sections from the real-traces refinement (session_protocol, reflexion_gate, anti_hallucination, modern_prompting, session_state_trust) into the original: **59,306 chars, +14.4%, all ARMORED sections preserved**. This merged version is now deployed to `~/.hermes/SOUL.md`.
+
+The engine was additionally tested on the **plan-and-audit skill** (21KB, 445 lines) and produced a restrained +4% growth (464 lines, 7.5% chars) with targeted improvements:
+
+- **New rule:** "If user provides a URL or external reference, read it immediately — do not assume you already have the information"
+- **Explicit completion checklist:** "Explicitly list each completed phase before declaring done"
+- **Workflow adherence warning:** Direct behavioral fix for 2026-08-05 and 2026-08-03 sessions where the agent deviated mid-workflow
+- **Version bumped:** 2.0.0 → 2.1.0
+- **Minor fixes:** Unicode rendering fix in example table (corrupted character → proper 🔴 emoji)
 
 ---
 
@@ -617,12 +629,12 @@ Priority-ranked from highest impact to lowest:
 
 ### P0 — Bugs That Affect Correctness
 
-| # | Issue | Impact | Fix Complexity |
-|---|-------|--------|----------------|
-| 1 | Severity never updates (line 372) | Convergence always sees "stable" +0.4 | 1 line (track actual change) |
-| 2 | SIZE_MULTIPLIER_CAP docstring wrong | Confusion during debugging | 3 lines (update docstring) |
-| 3 | `SoulTarget.extract_armored_sections()` uses wrong tag | Dead code for SOUL.md | 10 lines (align with auditor) |
-| 4 | `_quick_verify()` meaningless | False safety signal | Remove or replace |
+| # | Issue | Impact | Fix Complexity | Status |
+|---|-------|--------|----------------|--------|
+| 1 | Severity never updates (line 372) | Convergence always sees "stable" +0.4 | 1 line (track actual change) | ✅ **FIXED** |
+| 2 | SIZE_MULTIPLIER_CAP docstring wrong | Confusion during debugging | 3 lines (update docstring) | ✅ **FIXED** |
+| 3 | `SoulTarget.extract_armored_sections()` uses wrong tag | Dead code for SOUL.md | 10 lines (align with auditor) | ✅ **FIXED** |
+| 4 | `_quick_verify()` meaningless | False safety signal | Remove or replace | 🟡 Not started |
 
 ### P1 — Metrics That Need Improvement
 
