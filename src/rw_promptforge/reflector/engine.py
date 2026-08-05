@@ -357,9 +357,13 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
         import concurrent.futures
 
         workers = min(max_workers, max(len(tasks), 1))
+        done_count = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(_refine_one, t) for t in tasks]
             for fut in concurrent.futures.as_completed(futures):
+                done_count += 1
+                if done_count % 4 == 0 or done_count == len(tasks):
+                    print(f"  ↳ sections refined: {done_count}/{len(tasks)}", flush=True)
                 result = fut.result()
                 if result:
                     name, content = result

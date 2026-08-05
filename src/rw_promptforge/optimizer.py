@@ -120,6 +120,8 @@ class Optimizer:
         self._multiplier_history: list[MultiplierEntry] = []
         # LLM judge context (baseline artifact, failure traces) — set per round
         self._judge_context: tuple[str, str] | None = None
+        # Concurrency for chunked section refinement (fewer = gentler on rate limits)
+        self.section_workers = 4
 
     def optimize_skill(
         self, artifact_path: str, skill_name: str
@@ -229,6 +231,7 @@ class Optimizer:
                         failure_traces=failure_summary,
                         history=history_text + variation,
                         size_budget=per_section_budget,
+                        max_workers=self.section_workers,
                     )
                     if not improved:
                         continue
