@@ -94,22 +94,41 @@ class SessionDBReader:
         finally:
             conn.close()
 
+
+    def _skill_filter_sql(self, skill_name: str | None) -> tuple[str, tuple]:
+        """Build a (where_clause, params) pair that scopes queries to a skill.
+
+        Strategy: join messages to sessions and filter by the session's
+        loaded system_prompt containing the skill name. This is approximate
+        (a skill name appearing in unrelated conversation text would match)
+        but is far better than the previous no-op, which returned the same
+        global pool for every skill.
+
+        Returns an empty WHERE clause when skill_name is None (global query).
+        """
+        if not skill_name:
+            return "", ()
+        return " AND s.system_prompt LIKE ?", (f"%{skill_name}%",)
+
     def find_corrections(
         self, skill_name: str | None = None, limit: int = 10
     ) -> list[FailureTrace]:
         """Find sessions where user corrected the agent."""
+        skill_where, skill_params = self._skill_filter_sql(skill_name)
         traces = []
         for pattern, severity, failure_type in self.CORRECTION_PATTERNS:
             rows = self._query(
                 """
                 SELECT DISTINCT m.session_id, m.timestamp, m.content
                 FROM messages m
+                LEFT JOIN sessions s ON m.session_id = s.id
                 WHERE m.role = 'user'
                 AND m.content LIKE ?
+                """ + skill_where + """
                 ORDER BY m.timestamp DESC
                 LIMIT ?
                 """,
-                (pattern, limit),
+                (pattern,) + skill_params + (limit,),
             )
             for row in rows:
                 prev = self._query(
@@ -183,18 +202,21 @@ class SessionDBReader:
         self, skill_name: str | None = None, limit: int = 10
     ) -> list[FailureTrace]:
         """Find sessions with repeated tool call failures."""
+        skill_where, skill_params = self._skill_filter_sql(skill_name)
         rows = self._query(
             """
-            SELECT session_id, COUNT(*) as fail_count
-            FROM messages
-            WHERE role = 'tool'
-            AND content LIKE '%error%' OR content LIKE '%Error%'
-            GROUP BY session_id
+            SELECT DISTINCT m.session_id, COUNT(*) as fail_count
+            FROM messages m
+            LEFT JOIN sessions s ON m.session_id = s.id
+            WHERE m.role = 'tool'
+            AND (m.content LIKE '%error%' OR m.content LIKE '%Error%')
+            """ + skill_where + """
+            GROUP BY m.session_id
             HAVING fail_count >= 3
             ORDER BY fail_count DESC
             LIMIT ?
             """,
-            (limit,),
+            skill_params + (limit,),
         )
         traces = []
         for row in rows:
