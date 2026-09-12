@@ -1,40 +1,45 @@
-"""Tests for SessionDBReader skill scoping (v5 — tool_name + content columns).
+"""Tests for SessionDBReader skill scoping (v6 — system_prompts table join).
 
 Tests that:
 1. Global queries (skill_name=None) return all traces
-2. Scoped queries filter to sessions where the skill was loaded
+2. Scoped queries filter to sessions whose system prompt contains the skill
 3. Nonexistent skills return empty results
 4. Different skills return different trace sets
 5. find_tool_failures respects skill_name scoping
+6. Sessions without system_prompt_hash are excluded from scoped queries
 """
 
 from __future__ import annotations
 
 import sqlite3
-import json
-import tempfile
-import os
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from rw_promptforge.datastore.session_db import SessionDBReader
-from rw_promptforge.datastore.models import FailureTrace
 
 
 @pytest.fixture
 def test_db(tmp_path):
-    """Create a minimal test state.db with skill_view calls and corrections."""
+    """Create a minimal test state.db with system_prompts and skill injection."""
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")
 
-    # sessions table
+    # sessions table (matching real schema: system_prompt is NULL, use hash)
     conn.execute("""
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY, source TEXT, user_id TEXT,
             session_key TEXT, chat_id TEXT, chat_type TEXT,
-            model TEXT, system_prompt TEXT, started_at REAL
+            model TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+            started_at REAL
+        )
+    """)
+    # system_prompts table
+    conn.execute("""
+        CREATE TABLE system_prompts (
+            hash TEXT PRIMARY KEY, prompt TEXT
         )
     """)
     # messages table
@@ -47,37 +52,45 @@ def test_db(tmp_path):
         )
     """)
 
-    # Session A: loaded skill "ast-tools-usage", then user corrected
+    # System prompt containing ast-tools-usage skill
+    prompt_a = "You are a helpful agent. Loaded skill: ast-tools-usage for code analysis."
+    hash_a = hashlib.sha256(prompt_a.encode()).hexdigest()
+    conn.execute("INSERT INTO system_prompts VALUES (?, ?)", (hash_a, prompt_a))
+
+    # System prompt containing spectral-clustering skill
+    prompt_b = "You are a helpful agent. Loaded skill: spectral-clustering for graph analysis."
+    hash_b = hashlib.sha256(prompt_b.encode()).hexdigest()
+    conn.execute("INSERT INTO system_prompts VALUES (?, ?)", (hash_b, prompt_b))
+
+    # System prompt with no skills
+    prompt_c = "You are a helpful agent. No special skills loaded."
+    hash_c = hashlib.sha256(prompt_c.encode()).hexdigest()
+    conn.execute("INSERT INTO system_prompts VALUES (?, ?)", (hash_c, prompt_c))
+
+    # Session A: ast-tools-usage skill, then user corrected
     conn.execute(
-        "INSERT INTO sessions VALUES ('sess-a', 'web', 'u1', 'k1', 'c1', 'web', 'm1', 'system prompt', 1000.0)"
+        "INSERT INTO sessions VALUES ('sess-a', 'web', 'u1', 'k1', 'c1', 'web', 'm1', NULL, ?, 1000.0)",
+        (hash_a,)
     )
-    # skill_view tool result for ast-tools-usage
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, tool_name, timestamp) VALUES (?, 'tool', ?, 'skill_view', 1001.0)",
-        ("sess-a", json.dumps({"success": True, "name": "ast-tools-usage"})),
-    )
-    # User correction in same session
     conn.execute(
         "INSERT INTO messages (session_id, role, content, tool_name, timestamp) VALUES (?, 'user', ?, NULL, 1002.0)",
         ("sess-a", "no, thats not what I meant at all"),
     )
 
-    # Session B: loaded a different skill, then user corrected
+    # Session B: spectral-clustering skill, then user corrected
     conn.execute(
-        "INSERT INTO sessions VALUES ('sess-b', 'web', 'u2', 'k2', 'c2', 'web', 'm2', 'different prompt', 2000.0)"
-    )
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, tool_name, timestamp) VALUES (?, 'tool', ?, 'skill_view', 2001.0)",
-        ("sess-b", json.dumps({"success": True, "name": "spectral-clustering"})),
+        "INSERT INTO sessions VALUES ('sess-b', 'web', 'u2', 'k2', 'c2', 'web', 'm2', NULL, ?, 2000.0)",
+        (hash_b,)
     )
     conn.execute(
         "INSERT INTO messages (session_id, role, content, tool_name, timestamp) VALUES (?, 'user', ?, NULL, 2002.0)",
         ("sess-b", "you were supposed to do it differently"),
     )
 
-    # Session C: no skill loaded, but user corrected
+    # Session C: no skills, but user corrected
     conn.execute(
-        "INSERT INTO sessions VALUES ('sess-c', 'web', 'u3', 'k3', 'c3', 'web', 'm3', 'no skill', 3000.0)"
+        "INSERT INTO sessions VALUES ('sess-c', 'web', 'u3', 'k3', 'c3', 'web', 'm3', NULL, ?, 3000.0)",
+        (hash_c,)
     )
     conn.execute(
         "INSERT INTO messages (session_id, role, content, tool_name, timestamp) VALUES (?, 'user', ?, NULL, 3001.0)",
@@ -134,9 +147,9 @@ def test_skill_filter_sql_helper(test_db):
     """_skill_filter_sql returns correct WHERE clause and params."""
     reader = SessionDBReader(db_path=test_db)
     where, params = reader._skill_filter_sql("test-skill")
-    assert "skill_view" in where
-    assert "skill_manage" in where
-    assert params == ('%"test-skill"%',)
+    assert "system_prompts" in where
+    assert "system_prompt_hash" in where
+    assert params == ("%test-skill%",)
 
     where_none, params_none = reader._skill_filter_sql(None)
     assert where_none == ""
