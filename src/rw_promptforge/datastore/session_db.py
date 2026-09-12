@@ -98,16 +98,17 @@ class SessionDBReader:
     def _skill_filter_sql(self, skill_name: str | None) -> tuple[str, tuple]:
         """Build a (where_clause, params) pair that scopes queries to a skill.
 
-        Strategy: find sessions where the assistant invoked skill_view() or
-        skill_manage() with this skill name, by parsing the tool_calls JSON
-        column. This is the exact signal of which skill was loaded — far more
-        precise than matching against system_prompt text.
+        Strategy: find sessions where the agent loaded this skill, detected
+        by tool_name='skill_view' rows whose content JSON contains
+        "name": "<skill-name>". This is the exact signal of which skill was
+        loaded — far more precise than matching against system_prompt text.
 
-        The tool_calls column is a JSON array of
-        {"function": {"name": "...", "arguments": "{\"name\":\"<skill>\"}"}}.
-        We use json_tree() in an EXISTS subquery to walk the JSON and match
-        function.name against skill_view/skill_manage, then check that the
-        sibling arguments JSON contains the skill name.
+        The skill_view tool result is stored as a role='tool' message with
+        content like {"success": true, "name": "ast-tools-usage", ...}.
+        We match the skill name against the content JSON.
+
+        Also captures skill_manage calls (tool_name='skill_manage') where
+        the content or arguments reference the skill name.
 
         Returns an empty WHERE clause when skill_name is None (global query).
         """
@@ -116,12 +117,8 @@ class SessionDBReader:
         return (
             " AND m.session_id IN ("
             "  SELECT DISTINCT m2.session_id FROM messages m2"
-            "  WHERE EXISTS ("
-            "    SELECT 1 FROM json_tree(m2.tool_calls) AS jt"
-            "    WHERE jt.key = 'function'"
-            "    AND json_extract(jt.value, '$.name') IN ('skill_view', 'skill_manage')"
-            "    AND json_extract(jt.value, '$.arguments') LIKE ?"
-            "  )"
+            "  WHERE m2.tool_name IN ('skill_view', 'skill_manage')"
+            "  AND m2.content LIKE ?"
             " )",
             (f'%"{skill_name}"%',),
         )
