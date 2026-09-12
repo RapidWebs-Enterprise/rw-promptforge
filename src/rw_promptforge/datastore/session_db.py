@@ -98,29 +98,26 @@ class SessionDBReader:
     def _skill_filter_sql(self, skill_name: str | None) -> tuple[str, tuple]:
         """Build a (where_clause, params) pair that scopes queries to a skill.
 
-        Strategy: find sessions where the agent loaded this skill, detected
-        by tool_name='skill_view' rows whose content JSON contains
-        "name": "<skill-name>". This is the exact signal of which skill was
-        loaded — far more precise than matching against system_prompt text.
+        Strategy: join messages to sessions, then join sessions to the
+        system_prompts table via system_prompt_hash, and match the skill
+        name against the system prompt text. Skills are injected into the
+        system prompt — this is the real signal of which skills were loaded.
 
-        The skill_view tool result is stored as a role='tool' message with
-        content like {"success": true, "name": "ast-tools-usage", ...}.
-        We match the skill name against the content JSON.
-
-        Also captures skill_manage calls (tool_name='skill_manage') where
-        the content or arguments reference the skill name.
+        The sessions.system_prompt column is always NULL; the actual prompt
+        lives in system_prompts.prompt, keyed by sessions.system_prompt_hash.
 
         Returns an empty WHERE clause when skill_name is None (global query).
         """
         if not skill_name:
             return "", ()
         return (
-            " AND m.session_id IN ("
-            "  SELECT DISTINCT m2.session_id FROM messages m2"
-            "  WHERE m2.tool_name IN ('skill_view', 'skill_manage')"
-            "  AND m2.content LIKE ?"
+            " AND EXISTS ("
+            "  SELECT 1 FROM sessions s"
+            "  JOIN system_prompts sp ON s.system_prompt_hash = sp.hash"
+            "  WHERE s.id = m.session_id"
+            "  AND sp.prompt LIKE ?"
             " )",
-            (f'%"{skill_name}"%',),
+            (f"%{skill_name}%",),
         )
 
     def find_corrections(
