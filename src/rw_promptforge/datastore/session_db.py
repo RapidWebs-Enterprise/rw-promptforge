@@ -98,22 +98,43 @@ class SessionDBReader:
     def _skill_filter_sql(self, skill_name: str | None) -> tuple[str, tuple]:
         """Build a (where_clause, params) pair that scopes queries to a skill.
 
-        Strategy: join messages to sessions and filter by the session's
-        loaded system_prompt containing the skill name. This is approximate
-        (a skill name appearing in unrelated conversation text would match)
-        but is far better than the previous no-op, which returned the same
-        global pool for every skill.
+        Strategy: find sessions where the assistant invoked skill_view() or
+        skill_manage() with this skill name, by parsing the tool_calls JSON
+        column. This is the exact signal of which skill was loaded — far more
+        precise than matching against system_prompt text.
+
+        The tool_calls column is a JSON array of
+        {"function": {"name": "...", "arguments": "{\"name\":\"<skill>\"}"}}.
+        We use json_tree() in an EXISTS subquery to walk the JSON and match
+        function.name against skill_view/skill_manage, then check that the
+        sibling arguments JSON contains the skill name.
 
         Returns an empty WHERE clause when skill_name is None (global query).
         """
         if not skill_name:
             return "", ()
-        return " AND s.system_prompt LIKE ?", (f"%{skill_name}%",)
+        return (
+            " AND m.session_id IN ("
+            "  SELECT DISTINCT m2.session_id FROM messages m2"
+            "  WHERE EXISTS ("
+            "    SELECT 1 FROM json_tree(m2.tool_calls) AS jt"
+            "    WHERE jt.key = 'function'"
+            "    AND json_extract(jt.value, '$.name') IN ('skill_view', 'skill_manage')"
+            "    AND json_extract(jt.value, '$.arguments') LIKE ?"
+            "  )"
+            " )",
+            (f'%"{skill_name}"%',),
+        )
 
     def find_corrections(
         self, skill_name: str | None = None, limit: int = 10
     ) -> list[FailureTrace]:
-        """Find sessions where user corrected the agent."""
+        """Find sessions where user corrected the agent.
+
+        When skill_name is provided, only returns corrections from sessions
+        where that skill was loaded (detected via skill_view/skill_manage
+        tool calls in the assistant's tool_calls JSON).
+        """
         skill_where, skill_params = self._skill_filter_sql(skill_name)
         traces = []
         for pattern, severity, failure_type in self.CORRECTION_PATTERNS:
@@ -201,7 +222,12 @@ class SessionDBReader:
     def find_tool_failures(
         self, skill_name: str | None = None, limit: int = 10
     ) -> list[FailureTrace]:
-        """Find sessions with repeated tool call failures."""
+        """Find sessions with repeated tool call failures.
+
+        When skill_name is provided, only returns failures from sessions
+        where that skill was loaded (detected via skill_view/skill_manage
+        tool calls in the assistant's tool_calls JSON).
+        """
         skill_where, skill_params = self._skill_filter_sql(skill_name)
         rows = self._query(
             """
