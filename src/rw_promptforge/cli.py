@@ -108,13 +108,6 @@ def main() -> None:
 )
 @click.option(
     "--examples",
-@click.option(
-    "--skill",
-    "skill_name",
-    help="Skill name for scoping traces (defaults to target filename)",
-)
-@click.option(
-    "--examples",
     help="Path to few-shot example files",
 )
 @click.option(
@@ -163,14 +156,12 @@ def optimize(
     min_rounds: int,
     beam_size: int,
     metric: str,
-    skill_name: str | None,
+    skill: str | None,
     examples: str | None,
     frontier_size: int,
     convergence_threshold: float,
     no_reverse_audit: bool,
     max_growth: float,
-    output: str | None,
-) -> None:
     output: str | None,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
@@ -237,8 +228,11 @@ def optimize(
 
     console.print("\n[bold]Optimizing...[/bold]")
 
+    # Use --skill flag if provided, otherwise derive from path
+    skill_name = skill or path.split("/")[-1].replace("-", "_").replace(".", "_")
+
     if target_type == "skill":
-        result = optimizer.optimize_skill(path, skill_name=path.split("/")[-1])
+        result = optimizer.optimize_skill(path, skill_name=skill_name)
     else:  # soul
         result = optimizer.optimize_soul(path)
 
