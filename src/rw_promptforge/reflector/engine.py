@@ -16,6 +16,7 @@ Improvements over v1:
 from __future__ import annotations
 
 import re
+import sys
 
 from rw_promptforge.datastore.models import LearningLogEntry
 from rw_promptforge.provider import Provider
@@ -66,11 +67,40 @@ these specific failures from recurring. Be targeted — fix what's broken,
 don't rewrite everything."""
 
 
-class Reflector:
-    """LLM-powered reflection engine — reads real traces, proposes fixes."""
+class BudgetExceededError(Exception):
+    """Raised when an LLM reflection result exceeds its size budget.
 
-    def __init__(self, provider: Provider) -> None:
+    Replaces the old silent head+marker+tail splice that corrupted the
+    production SOUL.md on 2026-08-05 (three `... [TRUNCATED] ...` markers
+    baked into live content). Callers decide the policy: retry with a
+    compression instruction or keep the original content — but the
+    un-truncated result is never silently mutilated again.
+    """
+
+    def __init__(self, context: str, actual: int, budget: int):
+        self.context = context
+        self.actual_chars = actual
+        self.budget_chars = budget
+        super().__init__(
+            f"{context}: result is {actual} chars, budget is {budget} "
+            f"(overflow {actual - budget})"
+        )
+
+
+class Reflector:
+    """Generates improved prompts from failure analysis."""
+
+    VALID_OVERFLOW_STRATEGIES = ("retry", "fail")
+
+    def __init__(self, provider: Provider, on_overflow: str = "retry"):
         self.provider = provider
+        if on_overflow not in self.VALID_OVERFLOW_STRATEGIES:
+            raise ValueError(
+                f"on_overflow must be one of {self.VALID_OVERFLOW_STRATEGIES}, "
+                f"got {on_overflow!r}"
+            )
+        self.on_overflow = on_overflow
+        self.max_retries = 1
 
     def reflect(
         self,
@@ -99,14 +129,47 @@ class Reflector:
             prompt=user_prompt,
             system=REFLECTION_SYSTEM_PROMPT,
         )
-
-        # Enforce size budget
+        # Enforce size budget — never splice content mid-stream.
+        # (The old head+marker+tail splice corrupted production SOUL.md
+        # on 2026-08-05; see BudgetExceededError docstring.)
         if size_budget > 0 and len(result) > size_budget:
-            # Truncate with notice
-            half = size_budget // 2
-            result = result[:half] + "\n... [TRUNCATED] ...\n" + result[-half:]
-
+            result = self._fit_to_budget(
+                result,
+                size_budget,
+                context="full-artifact reflection",
+            )
         return result
+
+    def _fit_to_budget(self, result: str, budget: int, context: str) -> str:
+        """Bring an oversize reflection result within budget, or raise.
+
+        Strategy ``retry`` (default): re-prompt the provider with an explicit
+        compression instruction, up to ``max_retries`` times. If every retry
+        still overflows, raise BudgetExceededError.
+
+        Strategy ``fail``: raise BudgetExceededError immediately.
+        """
+        if len(result) <= budget:
+            return result
+        original_size = len(result)
+        if self.on_overflow == "retry":
+            for _attempt in range(self.max_retries):
+                retry_prompt = (
+                    f"Your previous response was {len(result)} characters, exceeding the "
+                    f"budget of {budget}. Rewrite it to fit within {budget} characters "
+                    f"while preserving all substantive content.\n\nPrevious response:\n{result}"
+                )
+                result = self.provider.reflect(
+                    prompt=retry_prompt,
+                    system=(
+                        "You are a precise editor. Compress the provided text to fit the "
+                        "stated character budget. Preserve every rule, protocol, and "
+                        "structural element; shorten only prose."
+                    ),
+                ).strip()
+                if len(result) <= budget:
+                    return result
+        raise BudgetExceededError(context, original_size, budget)
 
     def reflect_with_verification(
         self,
@@ -153,6 +216,7 @@ class Reflector:
         artifact: str,
         failure_traces: str,
         history: str = "(no prior improvements)",
+        size_budget: int = 0,
     ) -> tuple[str, str]:
         """Two-step reflection: diagnose root cause, then rewrite.
 
@@ -187,10 +251,14 @@ ROOT CAUSE:
             prompt=user_prompt,
             system=f"""{REFLECTION_SYSTEM_PROMPT}
 
-ROOT CAUSE DIAGNOSIS: {root_cause}
+## Root Cause Analysis
+{root_cause}
 
-Use this diagnosis to make targeted fixes. Don't rewrite what's working."""
-        )
+Apply the fix described above. Ensure the rewrite addresses the root cause.""",
+        ).strip()
+
+        if size_budget > 0 and len(improved) > size_budget:
+            improved = self._fit_to_budget(improved, size_budget, context="artifact")
 
         return improved, root_cause
 
@@ -344,12 +412,20 @@ Return ONLY the improved section content — the text that goes inside <{tag} na
                 ).strip()
                 # Strip markdown code fences models often wrap output in
                 result = _strip_code_fences(result)
-                # Enforce per-section size budget (relative to original section)
+                # Enforce per-section size budget (relative to original section).
+                # Never splice — retry with compression or fail loud and keep
+                # the original section (handled by the except below).
                 if size_budget > 0 and len(result) > size_budget:
-                    half = size_budget // 2
-                    result = result[:half] + "\n... [TRUNCATED] ...\n" + result[-half:]
+                    result = self._fit_to_budget(
+                        result,
+                        size_budget,
+                        context=f"section {name!r}",
+                    )
                 if result and len(result) >= 10:
                     return name, result
+            except BudgetExceededError as exc:
+                print(f"  ⚠ {exc} — keeping original section", file=sys.stderr, flush=True)
+                return name, content  # preserve original in results
             except Exception:
                 pass
             return None  # keep original section on failure

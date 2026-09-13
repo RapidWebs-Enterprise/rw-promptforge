@@ -139,6 +139,18 @@ def main() -> None:
     "--output", "-o",
     help="Output path for optimized artifact (default: prompt output to stdout)",
 )
+@click.option(
+    "--on-overflow",
+    type=click.Choice(["retry", "fail"]),
+    default="retry",
+    show_default=True,
+    help=(
+        "Overflow strategy when a refined section exceeds its size budget: "
+        "'retry' re-prompts the model to compress (falls back to keeping the "
+        "original section with a loud warning); 'fail' keeps the original "
+        "section immediately. Silent truncation is never performed."
+    ),
+)
 def optimize(
     path: str,
     target_type: str,
@@ -163,6 +175,7 @@ def optimize(
     no_reverse_audit: bool,
     max_growth: float,
     output: str | None,
+    on_overflow: str,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
     from rw_promptforge.optimizer import Optimizer
@@ -188,7 +201,7 @@ def optimize(
     else:
         provider_obj = Provider.from_env(model=model)
 
-    reflector = Reflector(provider_obj)
+    reflector = Reflector(provider_obj, on_overflow=on_overflow)
 
     # v2.1: load few-shot examples when provided
     example_list = None
