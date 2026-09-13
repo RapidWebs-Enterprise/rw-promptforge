@@ -29,8 +29,14 @@ def main() -> None:
     default="openai",
     help="LLM provider for the reflection step.",
 )
-@click.option("--endpoint", default=None, help="Custom OpenAI-compatible endpoint URL.")
+@click.option(
+    "--endpoint", default=None, help="Custom OpenAI-compatible endpoint URL.")
 @click.option("--model", default="gpt-4o-mini", help="Model for reflection LLM.")
+@click.option(
+    "--skill",
+    default=None,
+    help="Explicit skill name for trace scoping (overrides path-derived name).",
+)
 @click.option(
     "--max-rounds",
     default=3,
@@ -102,39 +108,43 @@ def main() -> None:
 )
 @click.option(
     "--examples",
-    default=None,
-    type=str,
-    help="JSONL of few-shot examples (prompt/model_response/target_response or rubrics).",
+@click.option(
+    "--skill",
+    "skill_name",
+    help="Skill name for scoping traces (defaults to target filename)",
+)
+@click.option(
+    "--examples",
+    help="Path to few-shot example files",
 )
 @click.option(
     "--frontier-size",
     default=5,
-    type=int,
-    help="Max candidates kept on the frontier (v2.1, default: 5).",
+    show_default=True,
+    help="Number of candidate solutions to evaluate each round",
 )
 @click.option(
     "--convergence-threshold",
-    default=0.8,
+    default=0.01,
+    show_default=True,
     type=float,
-    help="Convergence score for hard stop (v2.2, default: 0.8).",
+    help="Minimum normalized score change to continue iterating",
 )
 @click.option(
     "--no-reverse-audit",
     is_flag=True,
-    default=False,
-    help="Skip the reverse audit gates (v2.2, risky — for exploration).",
+    help="Disable reverse audit after each round",
 )
 @click.option(
     "--max-growth",
     default=1.5,
+    show_default=True,
     type=float,
-    help="Growth cap as multiplier of original size (v2.2, default: 1.5).",
+    help="Maximum allowed prompt size growth factor",
 )
 @click.option(
-    "--output",
-    default=None,
-    type=str,
-    help="Save optimized output to a separate file (instead of overwriting).",
+    "--output", "-o",
+    help="Output path for optimized artifact (default: prompt output to stdout)",
 )
 def optimize(
     path: str,
@@ -153,11 +163,14 @@ def optimize(
     min_rounds: int,
     beam_size: int,
     metric: str,
+    skill_name: str | None,
     examples: str | None,
     frontier_size: int,
     convergence_threshold: float,
     no_reverse_audit: bool,
     max_growth: float,
+    output: str | None,
+) -> None:
     output: str | None,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""

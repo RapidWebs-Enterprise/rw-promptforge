@@ -177,33 +177,40 @@ class SessionDBReader:
         unique.sort(key=lambda x: x.severity, reverse=True)
         return unique[:limit]
 
-    def find_protocol_violations(self, limit: int = 10) -> list[FailureTrace]:
-        """Find sessions where agent violated SOUL.md protocols."""
+    def find_protocol_violations(
+        self, skill_name: str | None = None, limit: int = 10
+    ) -> list[FailureTrace]:
+        """Find sessions with protocol violations.
+
+        When skill_name is provided, only returns violations from sessions
+        where that skill was loaded (detected via system_prompts join).
+        """
+        skill_where, skill_params = self._skill_filter_sql(skill_name)
+        rows = self._query(
+            f"""
+            SELECT DISTINCT m.session_id, m.timestamp, m.content
+            FROM messages m
+            WHERE m.role = 'assistant'
+            AND m.content LIKE ?
+            {skill_where}
+            ORDER BY m.timestamp DESC
+            LIMIT ?
+            """,
+            ("(I'm unable to assist with that request)",) + skill_params + (limit,),
+        )
         traces = []
-        for pattern in self.PROTOCOL_VIOLATION_PATTERNS:
-            rows = self._query(
-                """
-                SELECT DISTINCT m.session_id, m.timestamp, m.content
-                FROM messages m
-                WHERE (m.role = 'user' OR m.role = 'assistant')
-                AND m.content LIKE ?
-                ORDER BY m.timestamp DESC
-                LIMIT ?
-                """,
-                (pattern, limit),
-            )
-            for row in rows:
-                traces.append(
-                    FailureTrace(
-                        session_id=row["session_id"],
-                        timestamp=row["timestamp"],
-                        what_happened=row["content"][:500],
-                        user_correction="",
-                        context="protocol_violation",
-                        severity=2,
-                        failure_type="protocol_violation",
-                    )
+        for row in rows:
+            traces.append(
+                FailureTrace(
+                    session_id=row["session_id"],
+                    timestamp=row["timestamp"],
+                    what_happened=row["content"][:500],
+                    user_correction="",
+                    context="protocol_violation",
+                    severity=2,
+                    failure_type="protocol_violation",
                 )
+            )
         seen = set()
         unique = []
         for t in traces:
@@ -318,7 +325,7 @@ class SessionDBReader:
         This is the v2 replacement for get_contrastive_summary().
         """
         corrections = self.find_corrections(skill_name, limit)
-        violations = self.find_protocol_violations(limit // 2)
+        violations = self.find_protocol_violations(skill_name, limit // 2)
         failures = self.find_tool_failures(skill_name, limit // 2)
 
         all_failures = corrections + violations + failures
