@@ -151,6 +151,29 @@ def main() -> None:
         "section immediately. Silent truncation is never performed."
     ),
 )
+@click.option(
+    "--ml-mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Enable ML enhancements (clustering, classification, reranking) "
+        "via RW_InferenceEngine. Requires: pip install 'rw-promptforge[ml]'. "
+        "Falls back to token-based methods if dependencies or endpoints "
+        "are unavailable."
+    ),
+)
+@click.option(
+    "--ml-endpoint",
+    default=None,
+    help="RW_InferenceEngine endpoint (default: http://srv1:8300).",
+)
+@click.option(
+    "--min-traces",
+    default=10,
+    show_default=True,
+    type=int,
+    help="Minimum failure traces needed before clustering/classification activates.",
+)
 def optimize(
     path: str,
     target_type: str,
@@ -176,6 +199,9 @@ def optimize(
     max_growth: float,
     output: str | None,
     on_overflow: str,
+    ml_mode: bool,
+    ml_endpoint: str | None,
+    min_traces: int,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
     from rw_promptforge.optimizer import Optimizer
@@ -203,6 +229,34 @@ def optimize(
 
     reflector = Reflector(provider_obj, on_overflow=on_overflow)
 
+    # ML mode: build a separate Provider for embed/rerank against RW_IE
+    # (the chat-completions provider is the LLM for reflection; that's separate).
+    ml_ctx = None
+    if ml_mode:
+        try:
+            from rw_promptforge.cache import EmbeddingCache
+            from rw_promptforge.provider import Provider as _MLProvider
+
+            ml_provider = _MLProvider.from_ml_env()
+            if ml_endpoint:
+                ml_provider.endpoint = ml_endpoint.rstrip("/") + "/v1"
+            ml_provider._cache = EmbeddingCache()
+            ml_ctx = {
+                "provider": ml_provider,
+                "min_traces": min_traces,
+            }
+            console.print(
+                f"[dim]ML mode: [cyan]{ml_provider.embedding_model}[/] @ "
+                f"[cyan]{ml_provider.endpoint}[/] · min-traces={min_traces}[/dim]"
+            )
+        except ImportError as e:
+            console.print(
+                f"[yellow]⚠️  ML mode requested but dependencies missing:[/] {e}\n"
+                "    Install with: pip install 'rw-promptforge[ml]'. "
+                "Continuing without ML."
+            )
+            ml_mode = False
+
     # v2.1: load few-shot examples when provided
     example_list = None
     if examples:
@@ -228,6 +282,7 @@ def optimize(
         convergence_threshold=convergence_threshold,
         no_reverse_audit=no_reverse_audit,
         max_growth=max_growth,
+        ml_context=ml_ctx,
     )
 
     if beam_size > 1:

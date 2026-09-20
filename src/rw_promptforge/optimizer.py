@@ -95,9 +95,12 @@ class Optimizer:
         convergence_threshold: float = 0.8,
         no_reverse_audit: bool = False,
         max_growth: float = SIZE_MULTIPLIER_CAP,
+        # v2.3 ML enhancement (opt-in): {"provider": Provider, "min_traces": int}
+        ml_context: dict | None = None,
     ) -> None:
         self.provider = provider
         self.reflector = reflector
+        self.ml_context = ml_context  # opt-in ML context (None = token-only mode)
         self.max_rounds = min(max_rounds, MAX_ROUNDS_CAP)
         self.output_path = Path(output_path) if output_path else None
         self.db = SessionDBReader(db_path)
