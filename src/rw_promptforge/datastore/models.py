@@ -75,6 +75,26 @@ def jaccard_similarity(a: str, b: str) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
+def semantic_similarity(a, b) -> float:
+    """Cosine similarity between two embedding vectors.
+
+    Accepts numpy arrays, lists, or tuples of floats. Returns 0.0 when
+    either vector has zero norm. Raises ValueError on length mismatch.
+    numpy is imported lazily — token-based paths never pay the import cost.
+    """
+    if len(a) != len(b):
+        msg = f"embedding dimension mismatch: {len(a)} vs {len(b)}"
+        raise ValueError(msg)
+    import numpy as np  # noqa: PLC0415 — lazy: ML-only dependency
+
+    va = np.asarray(a, dtype=np.float32)
+    vb = np.asarray(b, dtype=np.float32)
+    norm = np.linalg.norm(va) * np.linalg.norm(vb)
+    if norm == 0.0:
+        return 0.0
+    return float(np.dot(va, vb) / norm)
+
+
 # ── Artifact Metadata ─────────────────────────────────────────────────
 
 
