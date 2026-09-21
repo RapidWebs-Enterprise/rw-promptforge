@@ -255,9 +255,21 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_config(cli_overrides: dict[str, Any] | None = None) -> RootConfig:
-    """Load merged config from all layers, in precedence order."""
+    """Load merged config from all layers, in precedence order.
+
+    If RootConfig.active_profile is set, that profile's overrides are merged
+    on top of the base config (profiles override everything except CLI).
+    """
     reset_provenance()
 
+    # Build layers in precedence order (low → high):
+    # 1. user TOML
+    # 2. project TOML
+    # 3. .env
+    # 4. deprecated env
+    # 5. process env
+    # 6. active profile (if set)
+    # 7. CLI overrides (highest)
     layers: list[dict[str, Any]] = [
         _load_user_toml(),
         _load_project_toml(),
@@ -265,16 +277,52 @@ def load_config(cli_overrides: dict[str, Any] | None = None) -> RootConfig:
         _load_deprecated_env(),
         _load_process_env(),
     ]
-    if cli_overrides:
-        layers.append(cli_overrides)
 
+    # Prune Nones to let Pydantic defaults win for unset fields.
     merged: dict[str, Any] = {}
     for layer in layers:
         merged = _deep_merge(merged, layer)
 
+    pruned = _prune_nones(merged)
+    cfg = RootConfig.model_validate(pruned)
+
+    # Apply active profile if set
+    if cfg.active_profile and cfg.active_profile in cfg.profiles:
+        profile = cfg.profiles[cfg.active_profile]
+        # Only include fields that were explicitly set in the profile TOML
+        # We reconstruct from the profile's model_fields_set (fields explicitly provided)
+        profile_dict = {}
+        for section_name, section_model in (
+            ("optimizer", profile.optimizer),
+            ("ml", profile.ml),
+            ("llm", profile.llm),
+            ("session_db", profile.session_db),
+        ):
+            # Get only fields that were explicitly set (not defaulted)
+            if hasattr(section_model, "model_fields_set"):
+                set_fields = section_model.model_fields_set
+                if set_fields:
+                    section_data = {k: getattr(section_model, k) for k in set_fields}
+                    if section_data:
+                        profile_dict[section_name] = section_data
+        if profile_dict:
+            merged = _deep_merge(merged, profile_dict)
+
+    # CLI overrides (highest priority)
+    if cli_overrides:
+        merged = _deep_merge(merged, cli_overrides)
+
     # Prune Nones to let Pydantic defaults win for unset fields.
     pruned = _prune_nones(merged)
-    return RootConfig.model_validate(pruned)
+    cfg = RootConfig.model_validate(merged)
+
+    # Clear profile-related fields from the final config — profiles are
+    # a one-time application mechanism, not part of the effective config.
+    # Keep active_profile for introspection; clear profiles dict.
+    cfg.profiles = {}
+    # cfg.active_profile = None  # keep for introspection
+
+    return cfg
 
 
 def _prune_nones(obj):

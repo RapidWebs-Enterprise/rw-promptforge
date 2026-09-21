@@ -214,6 +214,8 @@ def test_nested_unrelated_git_repos(tmp_path, monkeypatch):
     (inner / ".git" / "HEAD").write_text("ref: refs/heads/unrelated\n")
 
     monkeypatch.chdir(inner)
+    # Ensure no user config interferes
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fake_home")
     cfg = load_config()
     # `inner` is its own git repo → its root is the boundary → outer config is NOT picked up.
     assert cfg.optimizer.max_rounds == 3  # default, not 5

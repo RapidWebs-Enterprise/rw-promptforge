@@ -78,8 +78,12 @@ class RootConfig(_Base):
     )
 
     version: int = 1  # schema version — bump on breaking changes
+    active_profile: str | None = None  # name of active profile (None = use top-level)
 
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     ml: MLConfig = Field(default_factory=MLConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     session_db: SessionDBConfig = Field(default_factory=SessionDBConfig)
+
+    # Named profiles — each can override any subset of the top-level sections
+    profiles: dict[str, "RootConfig"] = Field(default_factory=dict)
