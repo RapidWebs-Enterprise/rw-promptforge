@@ -9,11 +9,17 @@ from rw_promptforge.cli import main
 
 def test_config_doctor_basic():
     runner = CliRunner()
-    res = runner.invoke(main, ["config", "doctor"])
-    assert res.exit_code == 0
-    assert "Config validation passed" in res.output
-    assert "Required fields present" in res.output
-    assert "ML mode disabled" in res.output
+    # Disable ML mode explicitly so we test the "ML mode disabled" path
+    import os
+    os.environ["RW_PROMPTFORGE_ML__ENABLED"] = "false"
+    try:
+        res = runner.invoke(main, ["config", "doctor"])
+        assert res.exit_code == 0
+        assert "Config validation passed" in res.output
+        assert "Required fields present" in res.output
+        assert "ML mode disabled" in res.output
+    finally:
+        os.environ.pop("RW_PROMPTFORGE_ML__ENABLED", None)
 
 
 def test_config_doctor_with_endpoint_override(tmp_path):

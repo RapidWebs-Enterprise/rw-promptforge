@@ -49,7 +49,7 @@ class OptimizerConfig(_Base):
 class LLMConfig(_Base):
     """Provider + model used for the LLM reflection step."""
 
-    provider: Literal["openai", "openrouter", "custom"] = "openai"
+    provider: Literal["openai", "openrouter", "custom", "nvidia"] = "openai"
     endpoint: str | None = None
     model: str = "gpt-4o-mini"
     api_key: SecretStr = SecretStr("")
