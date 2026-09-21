@@ -294,21 +294,11 @@ def optimize(
     optimizer = Optimizer(
         provider=provider_obj,
         reflector=reflector,
-        max_rounds=max_rounds,
         output_path=output_path,
         learning_log_strategy=learning_log,
         post_mutation_verify=post_mutation_verify,
-        semantic_threshold=semantic_threshold,
-        gain_threshold=gain_threshold,
-        stability_threshold=stability_threshold,
-        min_rounds=min_rounds,
-        beam_size=beam_size,
-        metric=metric,
         examples=example_list,
-        frontier_size=frontier_size,
-        convergence_threshold=convergence_threshold,
-        no_reverse_audit=no_reverse_audit,
-        max_growth=max_growth,
+        optimizer_config=_config.optimizer,  # layered-config-driven
         ml_context=ml_ctx,
     )
 

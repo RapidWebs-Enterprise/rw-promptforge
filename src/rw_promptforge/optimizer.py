@@ -18,6 +18,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rw_promptforge.configs.models import OptimizerConfig
 
 from rw_promptforge.datastore.models import (
     FailureTrace,
@@ -97,28 +101,45 @@ class Optimizer:
         max_growth: float = SIZE_MULTIPLIER_CAP,
         # v2.3 ML enhancement (opt-in): {"provider": Provider, "min_traces": int}
         ml_context: dict | None = None,
+        # Layered config (ADR-013): when given, values already reflect the 6-layer
+        # merge. Explicit kwargs above still override per-field.
+        optimizer_config: "OptimizerConfig | None" = None,
     ) -> None:
         self.provider = provider
         self.reflector = reflector
         self.ml_context = ml_context  # opt-in ML context (None = token-only mode)
-        self.max_rounds = min(max_rounds, MAX_ROUNDS_CAP)
+
+        if optimizer_config is not None:
+            opt = optimizer_config
+            self.max_rounds = min(opt.max_rounds, MAX_ROUNDS_CAP)
+            self.semantic_threshold = opt.semantic_threshold
+            self.gain_threshold = opt.gain_threshold
+            self.stability_threshold = opt.stability_threshold
+            self.min_rounds = opt.min_rounds
+            self.beam_size = max(1, opt.beam_size)
+            self.metric = MetricType(opt.metric) if isinstance(opt.metric, str) else opt.metric
+            self.frontier_size = max(1, opt.frontier_size)
+            self.convergence_threshold = opt.convergence_threshold
+            self.max_growth = opt.max_growth
+        else:
+            self.max_rounds = min(max_rounds, MAX_ROUNDS_CAP)
+            self.semantic_threshold = semantic_threshold
+            self.gain_threshold = gain_threshold
+            self.stability_threshold = stability_threshold
+            self.min_rounds = min_rounds
+            self.beam_size = max(1, beam_size)
+            self.metric = MetricType(metric) if isinstance(metric, str) else metric
+            self.frontier_size = max(1, frontier_size)
+            self.convergence_threshold = convergence_threshold
+            self.max_growth = max_growth
+
         self.output_path = Path(output_path) if output_path else None
         self.db = SessionDBReader(db_path)
         self.learning_log_strategy = learning_log_strategy
         self.post_mutation_verify = post_mutation_verify
-        self.semantic_threshold = semantic_threshold
-        self.gain_threshold = gain_threshold
-        self.stability_threshold = stability_threshold
-        self.min_rounds = min_rounds
-        # v2.1
-        self.beam_size = max(1, beam_size)
-        self.metric = MetricType(metric) if isinstance(metric, str) else metric
         self.examples = list(examples or [])
-        self.frontier = Frontier(max_size=max(1, frontier_size))
-        # v2.2 tuning knobs
-        self.convergence_threshold = convergence_threshold
+        self.frontier = Frontier(max_size=self.frontier_size)
         self.no_reverse_audit = no_reverse_audit
-        self.max_growth = max_growth
         self._learning_log: list[LearningLogEntry] = []
         self._score_history: list[CategoryScores] = []
         self._multiplier_history: list[MultiplierEntry] = []
