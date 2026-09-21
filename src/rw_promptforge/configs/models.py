@@ -73,6 +73,8 @@ class RootConfig(_Base):
     model_config = SettingsConfigDict(
         extra="forbid",
         hide_input_in_errors=True,
+        # Exclude None values so model_dump(mode='json') is TOML-serializable
+        json_schema_extra={"exclude_none": True},
     )
 
     version: int = 1  # schema version — bump on breaking changes
