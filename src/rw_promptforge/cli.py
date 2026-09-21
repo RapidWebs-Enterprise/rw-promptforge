@@ -152,19 +152,13 @@ _register_config()
 @click.option(
     "--on-overflow",
     type=click.Choice(["retry", "fail"]),
-    default="retry",
-    show_default=True,
-    help=(
-        "Overflow strategy when a refined section exceeds its size budget: "
-        "'retry' re-prompts the model to compress (falls back to keeping the "
-        "original section with a loud warning); 'fail' keeps the original "
-        "section immediately. Silent truncation is never performed."
-    ),
+    default=None,
+    help="Overflow strategy: retry | fail (default: retry)",
 )
 @click.option(
     "--ml-mode",
     is_flag=True,
-    default=False,
+    default=None,
     help=(
         "Enable ML enhancements (clustering, classification, reranking) "
         "via RW_InferenceEngine. Requires: pip install 'rw-promptforge[ml]'. "
@@ -179,10 +173,9 @@ _register_config()
 )
 @click.option(
     "--min-traces",
-    default=10,
-    show_default=True,
+    default=None,
     type=int,
-    help="Minimum failure traces needed before clustering/classification activates.",
+    help="Minimum failure traces needed before clustering/classification activates (default: 10).",
 )
 def optimize(
     path: str,
@@ -208,12 +201,36 @@ def optimize(
     no_reverse_audit: bool,
     max_growth: float,
     output: str | None,
-    on_overflow: str,
-    ml_mode: bool,
+    on_overflow: str | None,
+    ml_mode: bool | None,
     ml_endpoint: str | None,
-    min_traces: int,
+    min_traces: int | None,
 ) -> None:
     """Optimize a SOUL.md or skill file via reflective iteration."""
+    from rw_promptforge.configs import load_config
+    from rw_promptforge.configs.cli_loader import cli_overrides_from_locals
+
+    # Build CLI override dict from the flags the user actually passed.
+    cli_overrides = cli_overrides_from_locals(locals())
+    _config = load_config(cli_overrides=cli_overrides)
+
+    # Unpack for use below. config.ml.enabled is bool; flag value None means
+    # "user didn't pass" → falls back to config/env/file.
+    ml_mode = _config.ml.enabled
+    ml_endpoint = _config.ml.endpoint
+    min_traces = _config.ml.min_traces
+    # on_overflow default moved to None so we can distinguish "default" from
+    # "explicitly passed"; the actual default is 'retry' (matches pre-config).
+    if on_overflow is None:
+        on_overflow = "retry"
+
+    # LLM provider: CLI > config > env
+    if endpoint is None:
+        endpoint = _config.llm.endpoint
+    if not model:
+        model = _config.llm.model
+    if provider is None:
+        provider = _config.llm.provider
     from rw_promptforge.optimizer import Optimizer
     from rw_promptforge.provider import Provider
     from rw_promptforge.reflector.engine import Reflector
