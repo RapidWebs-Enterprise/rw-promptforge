@@ -15,6 +15,16 @@ def main() -> None:
     pass
 
 
+# Register config subcommand group (loaded late to keep `main` importable fast)
+def _register_config():
+    from rw_promptforge.configs.cli_config import config as config_group
+
+    main.add_command(config_group, "config")
+
+
+_register_config()
+
+
 @main.command()
 @click.argument("path", type=click.Path(exists=True, resolve_path=True))
 @click.option(
